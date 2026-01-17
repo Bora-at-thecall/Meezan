@@ -6,6 +6,7 @@ import {MeezanVault} from "../src/MeezanVault.sol";
 import {RiskLevel, getTargetAllocations} from "../src/RiskPresets.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
+import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 
 /**
  * @title MeezanVaultTest
@@ -17,6 +18,7 @@ contract MeezanVaultTest is Test {
     MockERC20 public tokenB; // USDC mock (6 decimals)
     MockPriceFeed public priceFeedA; // BTC/USD
     MockPriceFeed public priceFeedB; // USDC/USD
+    MockSwapRouter public swapRouter;
 
     address public owner = address(this);
     address public attacker = address(0xBEEF);
@@ -25,6 +27,9 @@ contract MeezanVaultTest is Test {
     // BTC at $40,000, USDC at $1 (8 decimals for Chainlink feeds)
     int256 constant BTC_PRICE = 40_000e8;
     int256 constant USDC_PRICE = 1e8;
+
+    // Default pool fee (0.3%)
+    uint24 constant POOL_FEE = 3000;
 
     // Initial balances in native token decimals
     uint256 constant INITIAL_WBTC = 10e8; // 10 WBTC
@@ -39,9 +44,19 @@ contract MeezanVaultTest is Test {
         priceFeedA = new MockPriceFeed(8, BTC_PRICE, "BTC/USD");
         priceFeedB = new MockPriceFeed(8, USDC_PRICE, "USDC/USD");
 
+        // Deploy mock swap router
+        // Exchange rate: 40000e18 means 1 WBTC = 40000 USDC (matches oracle price)
+        swapRouter = new MockSwapRouter(40000e18, 6, 8);
+
         // Deploy vault with Balanced risk level (50/50)
         vault = new MeezanVault(
-            address(tokenA), address(tokenB), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
         );
 
         // Mint tokens to owner
@@ -58,7 +73,15 @@ contract MeezanVaultTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function _createVault(RiskLevel level) internal returns (MeezanVault) {
-        return new MeezanVault(address(tokenA), address(tokenB), address(priceFeedA), address(priceFeedB), level);
+        return new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            level
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -180,34 +203,93 @@ contract MeezanVaultTest is Test {
 
     function test_RevertZeroAddressTokenA() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(0), address(tokenB), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced);
+        new MeezanVault(
+            address(0),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertZeroAddressTokenB() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(tokenA), address(0), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(0),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertZeroAddressPriceFeedA() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(tokenA), address(tokenB), address(0), address(priceFeedB), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(0),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertZeroAddressPriceFeedB() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(tokenA), address(tokenB), address(priceFeedA), address(0), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(0),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
+    }
+
+    function test_RevertZeroAddressSwapRouter() public {
+        vm.expectRevert(MeezanVault.ZeroAddress.selector);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(0),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertIdenticalTokens() public {
         vm.expectRevert(MeezanVault.IdenticalTokens.selector);
-        new MeezanVault(address(tokenA), address(tokenA), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenA),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertTokenDecimalsOver18() public {
         MockERC20 badToken = new MockERC20("Bad Token", "BAD", 19);
         vm.expectRevert(MeezanVault.InvalidTokenDecimals.selector);
         new MeezanVault(
-            address(badToken), address(tokenB), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced
+            address(badToken),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
         );
     }
 
@@ -215,20 +297,42 @@ contract MeezanVaultTest is Test {
         MockERC20 badToken = new MockERC20("Bad Token", "BAD", 20);
         vm.expectRevert(MeezanVault.InvalidTokenDecimals.selector);
         new MeezanVault(
-            address(tokenA), address(badToken), address(priceFeedA), address(priceFeedB), RiskLevel.Balanced
+            address(tokenA),
+            address(badToken),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
         );
     }
 
     function test_RevertFeedDecimalsOver18() public {
         MockPriceFeed badFeed = new MockPriceFeed(19, 1e19, "BAD/USD");
         vm.expectRevert(MeezanVault.InvalidFeedDecimals.selector);
-        new MeezanVault(address(tokenA), address(tokenB), address(badFeed), address(priceFeedB), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(badFeed),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_RevertFeedBDecimalsOver18() public {
         MockPriceFeed badFeed = new MockPriceFeed(20, 1e20, "BAD/USD");
         vm.expectRevert(MeezanVault.InvalidFeedDecimals.selector);
-        new MeezanVault(address(tokenA), address(tokenB), address(priceFeedA), address(badFeed), RiskLevel.Balanced);
+        new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(badFeed),
+            address(swapRouter),
+            POOL_FEE,
+            RiskLevel.Balanced
+        );
     }
 
     function test_ConstantsSetCorrectly() public view {
@@ -962,5 +1066,202 @@ contract MeezanVaultTest is Test {
 
         (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
         assertEq(pctA + pctB, 10000, "Current allocations should sum to 10000");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // depositUSDC Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_DepositUSDCSwapsToTargetAllocation() public {
+        // Setup: Fund swap router with WBTC so it can fulfill swaps
+        tokenA.mint(address(swapRouter), 100e8); // 100 WBTC
+
+        // Deposit 80,000 USDC into empty vault (50/50 target)
+        // Expected: 50% should be in WBTC ($40,000 worth = 1 WBTC)
+        uint256 depositAmount = 80_000e6;
+        vault.depositUSDC(depositAmount);
+
+        // Check WBTC was purchased
+        (uint256 balA, uint256 balB) = vault.holdings();
+        assertEq(balA, 1e8, "Should have bought 1 WBTC");
+        // Remaining USDC = 80,000 - 40,000 (spent) = 40,000
+        assertEq(balB, 40_000e6, "Should have 40,000 USDC remaining");
+    }
+
+    function test_DepositUSDCEmitsEvent() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        uint256 depositAmount = 80_000e6;
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.DepositAndAllocated(depositAmount, 1e8, 40_000e6);
+
+        vault.depositUSDC(depositAmount);
+    }
+
+    function test_DepositUSDCNoSwapWhenAlreadyOverAllocated() public {
+        // First deposit some WBTC to over-allocate to tokenA
+        vault.depositTokenA(5e8); // 5 WBTC = $200,000
+
+        // Now deposit USDC - should not swap since we're already over-allocated to WBTC
+        uint256 depositAmount = 10_000e6;
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.DepositAndAllocated(depositAmount, 0, 0);
+
+        vault.depositUSDC(depositAmount);
+
+        // Check holdings
+        (uint256 balA, uint256 balB) = vault.holdings();
+        assertEq(balA, 5e8, "WBTC balance should be unchanged");
+        assertEq(balB, 10_000e6, "Should have full USDC deposit");
+    }
+
+    function test_DepositUSDCRevertsOnZeroAmount() public {
+        vm.expectRevert(MeezanVault.ZeroAmount.selector);
+        vault.depositUSDC(0);
+    }
+
+    function test_DepositUSDCRevertsNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.depositUSDC(1000e6);
+    }
+
+    function test_DepositUSDCSlippageCapEnforced() public {
+        // Fund router
+        tokenA.mint(address(swapRouter), 100e8);
+
+        // Set a higher exchange rate to simulate worse execution
+        // Normal: 40,000 USDC per WBTC
+        // Bad: 45,000 USDC per WBTC (12.5% worse than oracle - exceeds 1% slippage)
+        swapRouter.setExchangeRate(45_000e18);
+
+        uint256 depositAmount = 80_000e6;
+
+        // This should revert because the router demands more than 1% slippage allows
+        vm.expectRevert("Too much requested");
+        vault.depositUSDC(depositAmount);
+    }
+
+    function test_DepositUSDCApprovalsRevokedAfterSwap() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        vault.depositUSDC(80_000e6);
+
+        // Check that approval is revoked
+        uint256 allowance = tokenB.allowance(address(vault), address(swapRouter));
+        assertEq(allowance, 0, "Router approval should be revoked after swap");
+    }
+
+    function test_DepositUSDCCorrectSwapParameters() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        vault.depositUSDC(80_000e6);
+
+        // Check swap router received correct parameters
+        assertEq(swapRouter.lastTokenIn(), address(tokenB), "tokenIn should be USDC");
+        assertEq(swapRouter.lastTokenOut(), address(tokenA), "tokenOut should be WBTC");
+        assertEq(swapRouter.lastAmountOut(), 1e8, "amountOut should be 1 WBTC");
+    }
+
+    function test_DepositUSDCWithExistingBalance() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        // First deposit some USDC normally
+        vault.depositTokenB(20_000e6);
+
+        // Now use depositUSDC
+        // Total after: 20k existing + 60k deposit = 80k USDC
+        // Target: 50/50 = $40k in WBTC = 1 WBTC
+        vault.depositUSDC(60_000e6);
+
+        (uint256 balA, uint256 balB) = vault.holdings();
+        assertEq(balA, 1e8, "Should have 1 WBTC");
+        // 80k - 40k spent = 40k remaining
+        assertEq(balB, 40_000e6, "Should have 40k USDC remaining");
+    }
+
+    function test_DepositUSDCWithExistingWBTC() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        // First deposit some WBTC
+        vault.depositTokenA(0.5e8); // 0.5 WBTC = $20,000
+
+        // Deposit USDC to reach 50/50
+        // Current: $20k WBTC, $0 USDC
+        // Deposit: $60k USDC
+        // Total: $80k
+        // Target: $40k WBTC, $40k USDC
+        // Need: $20k more WBTC = 0.5 WBTC
+        vault.depositUSDC(60_000e6);
+
+        (uint256 balA, uint256 balB) = vault.holdings();
+        assertEq(balA, 1e8, "Should have 1 WBTC total");
+        // 60k - 20k spent = 40k remaining
+        assertEq(balB, 40_000e6, "Should have 40k USDC remaining");
+    }
+
+    function test_SwapRouterSetCorrectly() public view {
+        assertEq(address(vault.swapRouter()), address(swapRouter), "SwapRouter should be set");
+        assertEq(vault.poolFee(), POOL_FEE, "Pool fee should be set");
+    }
+
+    function test_SlippageBpsConstant() public view {
+        assertEq(vault.SLIPPAGE_BPS(), 100, "Slippage should be 1% (100 bps)");
+    }
+
+    function test_MinSwapUsdConstant() public view {
+        assertEq(vault.MIN_SWAP_USD(), 10e18, "MIN_SWAP_USD should be $10");
+    }
+
+    function test_DepositUSDCSkipsDustSwap() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        // Deposit small amount that would result in swap below MIN_SWAP_USD ($10)
+        // First create a nearly balanced portfolio
+        vault.depositTokenA(1e8); // 1 WBTC = $40,000
+        vault.depositTokenB(40_000e6); // $40,000 USDC
+        // Now portfolio is exactly 50/50
+
+        // Deposit just $15 USDC
+        // Target 50% of ($80,000 + $15) = $40,007.50 in WBTC
+        // Current: $40,000 in WBTC
+        // usdToBuy = $7.50 < MIN_SWAP_USD ($10)
+        // Should skip swap
+        uint256 smallDeposit = 15e6; // $15 USDC
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.DepositAndAllocated(smallDeposit, 0, 0);
+
+        vault.depositUSDC(smallDeposit);
+
+        // Verify no swap occurred - WBTC balance unchanged
+        (uint256 balA, uint256 balB) = vault.holdings();
+        assertEq(balA, 1e8, "WBTC should be unchanged");
+        assertEq(balB, 40_015e6, "USDC should be 40,015");
+    }
+
+    function test_DepositUSDCSwapsWhenAboveMinThreshold() public {
+        tokenA.mint(address(swapRouter), 100e8);
+
+        // Deposit amount that results in swap above MIN_SWAP_USD ($10)
+        // First create a nearly balanced portfolio
+        vault.depositTokenA(1e8); // 1 WBTC = $40,000
+        vault.depositTokenB(40_000e6); // $40,000 USDC
+        // Now portfolio is exactly 50/50
+
+        // Deposit $100 USDC
+        // Target 50% of ($80,000 + $100) = $40,050 in WBTC
+        // Current: $40,000 in WBTC
+        // usdToBuy = $50 > MIN_SWAP_USD ($10)
+        // Should perform swap
+        uint256 deposit = 100e6; // $100 USDC
+
+        vault.depositUSDC(deposit);
+
+        // Verify swap occurred - WBTC balance should increase
+        (uint256 balA,) = vault.holdings();
+        assertGt(balA, 1e8, "WBTC should have increased");
     }
 }

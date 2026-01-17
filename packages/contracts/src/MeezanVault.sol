@@ -5,8 +5,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {RiskLevel, getTargetAllocations} from "./RiskPresets.sol";
 import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
+import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
 /**
  * @title MeezanVault
@@ -22,7 +24,7 @@ import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
  * - Owner can bypass cooldown; executor must respect it
  * - Withdrawals are always instant and unrestricted for the owner
  */
-contract MeezanVault {
+contract MeezanVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -40,6 +42,15 @@ contract MeezanVault {
 
     /// @notice Standard precision for USD values (18 decimals)
     uint256 private constant USD_PRECISION = 1e18;
+
+    /// @notice Slippage cap for swaps (1.0% = 100 bps)
+    uint256 public constant SLIPPAGE_BPS = 100;
+
+    /// @notice Minimum USD value to trigger a swap ($10 in 18-decimal USD)
+    uint256 public constant MIN_SWAP_USD = 10e18;
+
+    /// @notice Basis points denominator
+    uint256 private constant BPS_DENOMINATOR = 10000;
 
     // ─────────────────────────────────────────────────────────────────────
     // Errors
@@ -59,6 +70,7 @@ contract MeezanVault {
     error IncompleteRound();
     error InvalidTokenDecimals();
     error InvalidFeedDecimals();
+    error SlippageExceeded();
 
     // ─────────────────────────────────────────────────────────────────────
     // Events
@@ -77,6 +89,7 @@ contract MeezanVault {
         uint16 targetPctA,
         uint64 timestamp
     );
+    event DepositAndAllocated(uint256 amountUSDC, uint256 wbtcBought, uint256 usdcSpent);
 
     // ─────────────────────────────────────────────────────────────────────
     // Immutable State
@@ -118,6 +131,12 @@ contract MeezanVault {
     /// @notice Target allocation for token B in basis points (0-10000)
     uint16 public immutable targetPctB;
 
+    /// @notice Uniswap V3 SwapRouter address
+    ISwapRouter public immutable swapRouter;
+
+    /// @notice Uniswap V3 pool fee tier (e.g., 3000 = 0.3%)
+    uint24 public immutable poolFee;
+
     // ─────────────────────────────────────────────────────────────────────
     // Mutable State
     // ─────────────────────────────────────────────────────────────────────
@@ -157,11 +176,22 @@ contract MeezanVault {
      * @param _tokenB Address of token B (e.g., USDC)
      * @param _priceFeedA Chainlink price feed for token A (e.g., BTC/USD)
      * @param _priceFeedB Chainlink price feed for token B (e.g., USDC/USD)
+     * @param _swapRouter Uniswap V3 SwapRouter address
+     * @param _poolFee Uniswap V3 pool fee tier (e.g., 3000 for 0.3%)
      * @param _riskLevel The risk level determining target allocations
      */
-    constructor(address _tokenA, address _tokenB, address _priceFeedA, address _priceFeedB, RiskLevel _riskLevel) {
+    constructor(
+        address _tokenA,
+        address _tokenB,
+        address _priceFeedA,
+        address _priceFeedB,
+        address _swapRouter,
+        uint24 _poolFee,
+        RiskLevel _riskLevel
+    ) {
         if (_tokenA == address(0) || _tokenB == address(0)) revert ZeroAddress();
         if (_priceFeedA == address(0) || _priceFeedB == address(0)) revert ZeroAddress();
+        if (_swapRouter == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
 
         // Cache and validate token decimals
@@ -179,6 +209,8 @@ contract MeezanVault {
         tokenB = IERC20(_tokenB);
         priceFeedA = AggregatorV3Interface(_priceFeedA);
         priceFeedB = AggregatorV3Interface(_priceFeedB);
+        swapRouter = ISwapRouter(_swapRouter);
+        poolFee = _poolFee;
         tokenDecimalsA = _tokenDecimalsA;
         tokenDecimalsB = _tokenDecimalsB;
         feedDecimalsA = _feedDecimalsA;
@@ -235,6 +267,95 @@ contract MeezanVault {
         if (amount == 0) revert ZeroAmount();
         tokenB.safeTransferFrom(msg.sender, address(this), amount);
         emit Deposit(msg.sender, address(tokenB), amount);
+    }
+
+    /**
+     * @notice Deposit USDC and immediately swap to reach target allocation
+     * @dev Single transaction: pulls USDC, computes WBTC needed, swaps via Uniswap V3
+     * @param amountUSDC Amount of USDC to deposit
+     */
+    function depositUSDC(uint256 amountUSDC) external onlyOwner nonReentrant {
+        if (amountUSDC == 0) revert ZeroAmount();
+
+        // Pull USDC from owner
+        tokenB.safeTransferFrom(msg.sender, address(this), amountUSDC);
+
+        // Get current USD values
+        uint256 currentValueA = _usdValue(tokenA.balanceOf(address(this)), tokenDecimalsA, priceFeedA, feedDecimalsA);
+        uint256 depositValueB = _usdValue(amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB);
+        uint256 currentValueB =
+            _usdValue(tokenB.balanceOf(address(this)) - amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB);
+
+        uint256 totalUsdAfter = currentValueA + currentValueB + depositValueB;
+
+        // Compute desired USD value for token A
+        uint256 desiredUsdA = Math.mulDiv(totalUsdAfter, targetPctA, BPS_DENOMINATOR);
+
+        // If already at or above target, no swap needed
+        if (desiredUsdA <= currentValueA) {
+            emit DepositAndAllocated(amountUSDC, 0, 0);
+            return;
+        }
+
+        uint256 usdToBuy = desiredUsdA - currentValueA;
+
+        // Skip dust swaps below minimum threshold
+        if (usdToBuy < MIN_SWAP_USD) {
+            emit DepositAndAllocated(amountUSDC, 0, 0);
+            return;
+        }
+
+        // Convert USD to WBTC units using oracle price
+        // wbtcToBuy = usdToBuy * 10^tokenDecimalsA / priceA
+        // We need to reverse the _usdValue calculation
+        uint256 priceA = _getPrice(priceFeedA);
+        uint256 wbtcToBuy = Math.mulDiv(usdToBuy, 10 ** feedDecimalsA, priceA);
+        wbtcToBuy = Math.mulDiv(wbtcToBuy, 10 ** tokenDecimalsA, USD_PRECISION);
+
+        if (wbtcToBuy == 0) {
+            emit DepositAndAllocated(amountUSDC, 0, 0);
+            return;
+        }
+
+        // Calculate max USDC input based on oracle price + slippage
+        // oracleUsdcCost = usdToBuy converted to USDC units
+        uint256 priceB = _getPrice(priceFeedB);
+        uint256 oracleUsdcCost = Math.mulDiv(usdToBuy, 10 ** feedDecimalsB, priceB);
+        oracleUsdcCost = Math.mulDiv(oracleUsdcCost, 10 ** tokenDecimalsB, USD_PRECISION);
+
+        // Max USDC = oracleCost * (1 + slippage)
+        uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + SLIPPAGE_BPS, BPS_DENOMINATOR);
+
+        // Cap at available USDC balance
+        uint256 availableUsdc = tokenB.balanceOf(address(this));
+        if (maxUsdcIn > availableUsdc) {
+            maxUsdcIn = availableUsdc;
+        }
+
+        // Approve router to spend USDC
+        tokenB.forceApprove(address(swapRouter), maxUsdcIn);
+
+        // Execute swap
+        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+            tokenIn: address(tokenB),
+            tokenOut: address(tokenA),
+            fee: poolFee,
+            recipient: address(this),
+            deadline: block.timestamp + 300,
+            amountOut: wbtcToBuy,
+            amountInMaximum: maxUsdcIn,
+            sqrtPriceLimitX96: 0
+        });
+
+        uint256 usdcSpent = swapRouter.exactOutputSingle(params);
+
+        // Revoke any remaining approval
+        tokenB.forceApprove(address(swapRouter), 0);
+
+        // Verify slippage wasn't exceeded (sanity check - router should revert but we double check)
+        if (usdcSpent > maxUsdcIn) revert SlippageExceeded();
+
+        emit DepositAndAllocated(amountUSDC, wbtcToBuy, usdcSpent);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -438,5 +559,21 @@ contract MeezanVault {
         // Result: (amount * price * USD_PRECISION) / (10^tokenDecimals * 10^feedDecimals)
         value = Math.mulDiv(amount, uint256(answer), 10 ** tokenDecimals);
         value = Math.mulDiv(value, USD_PRECISION, 10 ** feedDecimals);
+    }
+
+    /**
+     * @notice Gets validated price from a Chainlink feed
+     * @param feed The Chainlink price feed
+     * @return price The price as uint256
+     */
+    function _getPrice(AggregatorV3Interface feed) internal view returns (uint256) {
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
+
+        if (answer <= 0) revert InvalidPrice();
+        if (updatedAt == 0) revert StalePrice();
+        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (answeredInRound < roundId) revert IncompleteRound();
+
+        return uint256(answer);
     }
 }
