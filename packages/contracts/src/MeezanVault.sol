@@ -71,6 +71,8 @@ contract MeezanVault is ReentrancyGuard {
     error InvalidTokenDecimals();
     error InvalidFeedDecimals();
     error SlippageExceeded();
+    error InsufficientBalanceForSwap();
+    error InvalidPoolFee();
 
     // ─────────────────────────────────────────────────────────────────────
     // Events
@@ -90,6 +92,15 @@ contract MeezanVault is ReentrancyGuard {
         uint64 timestamp
     );
     event DepositAndAllocated(uint256 amountUSDC, uint256 wbtcBought, uint256 usdcSpent);
+    event Rebalanced(
+        address indexed caller,
+        address indexed sellToken,
+        address indexed buyToken,
+        uint256 amountOut,
+        uint256 amountIn,
+        uint16 driftBps,
+        uint64 timestamp
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // Immutable State
@@ -193,6 +204,7 @@ contract MeezanVault is ReentrancyGuard {
         if (_priceFeedA == address(0) || _priceFeedB == address(0)) revert ZeroAddress();
         if (_swapRouter == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
+        if (_poolFee != 100 && _poolFee != 500 && _poolFee != 3000 && _poolFee != 10000) revert InvalidPoolFee();
 
         // Cache and validate token decimals
         uint8 _tokenDecimalsA = IERC20Metadata(_tokenA).decimals();
@@ -326,11 +338,9 @@ contract MeezanVault is ReentrancyGuard {
         // Max USDC = oracleCost * (1 + slippage)
         uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + SLIPPAGE_BPS, BPS_DENOMINATOR);
 
-        // Cap at available USDC balance
+        // Check sufficient balance before swap
         uint256 availableUsdc = tokenB.balanceOf(address(this));
-        if (maxUsdcIn > availableUsdc) {
-            maxUsdcIn = availableUsdc;
-        }
+        if (availableUsdc < maxUsdcIn) revert InsufficientBalanceForSwap();
 
         // Approve router to spend USDC
         tokenB.forceApprove(address(swapRouter), maxUsdcIn);
@@ -408,16 +418,17 @@ contract MeezanVault is ReentrancyGuard {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Plan a rebalance operation (no swap executed yet)
+     * @notice Execute a rebalance swap to restore target allocation
      * @dev Callable by owner always (bypasses cooldown), or by executor if auto-rebalance is enabled.
      *      Executor must respect cooldown; owner does not.
      *      Enforces drift threshold. Reverts on empty vault.
-     *      Emits RebalancePlanned with direction info for off-chain execution.
+     *      Performs Uniswap V3 exactOutputSingle with oracle-based slippage protection.
      */
-    function rebalance() external onlyOwnerOrExecutor {
+    function rebalance() external onlyOwnerOrExecutor nonReentrant {
         // Check for empty vault
         (uint256 valueA, uint256 valueB) = _getUsdValues();
-        if (valueA + valueB == 0) revert EmptyVault();
+        uint256 totalUsd = valueA + valueB;
+        if (totalUsd == 0) revert EmptyVault();
 
         uint16 drift = driftBps();
         if (drift < DEFAULT_DRIFT_BPS) revert DriftTooLow();
@@ -429,24 +440,129 @@ contract MeezanVault is ReentrancyGuard {
             }
         }
 
-        (uint16 currentPctA,) = currentAllocationsBps();
+        // Compute desired USD value for token A
+        uint256 desiredUsdA = Math.mulDiv(totalUsd, targetPctA, BPS_DENOMINATOR);
 
-        // Determine direction
         address sellToken;
         address buyToken;
-        if (currentPctA > targetPctA) {
-            // Over-allocated to A, sell A for B
+        uint256 amountOut;
+        uint256 amountIn;
+
+        if (valueA > desiredUsdA) {
+            // Over-allocated to A: sell WBTC to buy USDC
+            uint256 usdToShift = valueA - desiredUsdA;
+
+            // Skip dust swaps
+            if (usdToShift < MIN_SWAP_USD) {
+                lastRebalanceAt = uint64(block.timestamp);
+                emit Rebalanced(msg.sender, address(tokenA), address(tokenB), 0, 0, drift, uint64(block.timestamp));
+                return;
+            }
+
             sellToken = address(tokenA);
             buyToken = address(tokenB);
+
+            // Calculate USDC to buy (amountOut)
+            uint256 priceB = _getPrice(priceFeedB);
+            uint256 usdcToBuy = Math.mulDiv(usdToShift, 10 ** feedDecimalsB, priceB);
+            usdcToBuy = Math.mulDiv(usdcToBuy, 10 ** tokenDecimalsB, USD_PRECISION);
+
+            if (usdcToBuy == 0) {
+                lastRebalanceAt = uint64(block.timestamp);
+                emit Rebalanced(msg.sender, sellToken, buyToken, 0, 0, drift, uint64(block.timestamp));
+                return;
+            }
+
+            // Calculate max WBTC input based on oracle price + slippage
+            uint256 priceA = _getPrice(priceFeedA);
+            uint256 oracleWbtcCost = Math.mulDiv(usdToShift, 10 ** feedDecimalsA, priceA);
+            oracleWbtcCost = Math.mulDiv(oracleWbtcCost, 10 ** tokenDecimalsA, USD_PRECISION);
+            uint256 maxWbtcIn = Math.mulDiv(oracleWbtcCost, BPS_DENOMINATOR + SLIPPAGE_BPS, BPS_DENOMINATOR);
+
+            // Check sufficient balance before swap
+            uint256 availableWbtc = tokenA.balanceOf(address(this));
+            if (availableWbtc < maxWbtcIn) revert InsufficientBalanceForSwap();
+
+            // Approve and swap
+            tokenA.forceApprove(address(swapRouter), maxWbtcIn);
+
+            ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+                tokenIn: address(tokenA),
+                tokenOut: address(tokenB),
+                fee: poolFee,
+                recipient: address(this),
+                deadline: block.timestamp + 300,
+                amountOut: usdcToBuy,
+                amountInMaximum: maxWbtcIn,
+                sqrtPriceLimitX96: 0
+            });
+
+            amountIn = swapRouter.exactOutputSingle(params);
+            amountOut = usdcToBuy;
+
+            tokenA.forceApprove(address(swapRouter), 0);
+
+            if (amountIn > maxWbtcIn) revert SlippageExceeded();
         } else {
-            // Under-allocated to A, sell B for A
+            // Under-allocated to A: sell USDC to buy WBTC
+            uint256 usdToShift = desiredUsdA - valueA;
+
+            // Skip dust swaps
+            if (usdToShift < MIN_SWAP_USD) {
+                lastRebalanceAt = uint64(block.timestamp);
+                emit Rebalanced(msg.sender, address(tokenB), address(tokenA), 0, 0, drift, uint64(block.timestamp));
+                return;
+            }
+
             sellToken = address(tokenB);
             buyToken = address(tokenA);
+
+            // Calculate WBTC to buy (amountOut)
+            uint256 priceA = _getPrice(priceFeedA);
+            uint256 wbtcToBuy = Math.mulDiv(usdToShift, 10 ** feedDecimalsA, priceA);
+            wbtcToBuy = Math.mulDiv(wbtcToBuy, 10 ** tokenDecimalsA, USD_PRECISION);
+
+            if (wbtcToBuy == 0) {
+                lastRebalanceAt = uint64(block.timestamp);
+                emit Rebalanced(msg.sender, sellToken, buyToken, 0, 0, drift, uint64(block.timestamp));
+                return;
+            }
+
+            // Calculate max USDC input based on oracle price + slippage
+            uint256 priceB = _getPrice(priceFeedB);
+            uint256 oracleUsdcCost = Math.mulDiv(usdToShift, 10 ** feedDecimalsB, priceB);
+            oracleUsdcCost = Math.mulDiv(oracleUsdcCost, 10 ** tokenDecimalsB, USD_PRECISION);
+            uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + SLIPPAGE_BPS, BPS_DENOMINATOR);
+
+            // Check sufficient balance before swap
+            uint256 availableUsdc = tokenB.balanceOf(address(this));
+            if (availableUsdc < maxUsdcIn) revert InsufficientBalanceForSwap();
+
+            // Approve and swap
+            tokenB.forceApprove(address(swapRouter), maxUsdcIn);
+
+            ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+                tokenIn: address(tokenB),
+                tokenOut: address(tokenA),
+                fee: poolFee,
+                recipient: address(this),
+                deadline: block.timestamp + 300,
+                amountOut: wbtcToBuy,
+                amountInMaximum: maxUsdcIn,
+                sqrtPriceLimitX96: 0
+            });
+
+            amountIn = swapRouter.exactOutputSingle(params);
+            amountOut = wbtcToBuy;
+
+            tokenB.forceApprove(address(swapRouter), 0);
+
+            if (amountIn > maxUsdcIn) revert SlippageExceeded();
         }
 
         lastRebalanceAt = uint64(block.timestamp);
 
-        emit RebalancePlanned(msg.sender, sellToken, buyToken, drift, currentPctA, targetPctA, uint64(block.timestamp));
+        emit Rebalanced(msg.sender, sellToken, buyToken, amountOut, amountIn, drift, uint64(block.timestamp));
     }
 
     // ─────────────────────────────────────────────────────────────────────

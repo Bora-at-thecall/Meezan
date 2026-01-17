@@ -2,25 +2,29 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ISwapRouter} from "../../src/interfaces/ISwapRouter.sol";
 
 /**
  * @title MockSwapRouter
  * @notice Mock Uniswap V3 SwapRouter for deterministic testing
- * @dev Simulates exactOutputSingle with a configurable exchange rate
+ * @dev Simulates exactOutputSingle with configurable exchange rates per direction
  */
 contract MockSwapRouter is ISwapRouter {
     using SafeERC20 for IERC20;
 
-    /// @notice Exchange rate: how many tokenIn units per tokenOut unit (scaled by 1e18)
-    uint256 public exchangeRate;
+    /// @notice Exchange rate for USDC->WBTC: USDC per WBTC (scaled by 1e18)
+    /// Example: 40000e18 means 40,000 USDC per 1 WBTC
+    uint256 public usdcPerWbtc;
 
-    /// @notice Token decimals for tokenIn (USDC = 6)
-    uint8 public tokenInDecimals;
+    /// @notice Exchange rate for WBTC->USDC: WBTC per USDC (scaled by 1e18)
+    /// Example: 25e12 means 0.000025 WBTC per 1 USDC (i.e., 1/40000)
+    uint256 public wbtcPerUsdc;
 
-    /// @notice Token decimals for tokenOut (WBTC = 8)
-    uint8 public tokenOutDecimals;
+    /// @notice Token addresses for direction detection
+    address public wbtcToken;
+    address public usdcToken;
 
     /// @notice Whether to simulate a revert for exceeding amountInMaximum
     bool public shouldRevertOnExcess;
@@ -32,19 +36,23 @@ contract MockSwapRouter is ISwapRouter {
     uint256 public lastAmountInMaximum;
     uint256 public lastAmountIn;
 
-    constructor(uint256 _exchangeRate, uint8 _tokenInDecimals, uint8 _tokenOutDecimals) {
-        exchangeRate = _exchangeRate;
-        tokenInDecimals = _tokenInDecimals;
-        tokenOutDecimals = _tokenOutDecimals;
+    constructor(uint256 _usdcPerWbtc, address _wbtcToken, address _usdcToken) {
+        usdcPerWbtc = _usdcPerWbtc;
+        // Calculate inverse: if 40000 USDC per WBTC, then 1/40000 WBTC per USDC
+        // In 1e18 precision: 1e18 * 1e18 / 40000e18 = 25e12
+        wbtcPerUsdc = 1e36 / _usdcPerWbtc;
+        wbtcToken = _wbtcToken;
+        usdcToken = _usdcToken;
         shouldRevertOnExcess = true;
     }
 
     /**
-     * @notice Set the exchange rate
-     * @param _exchangeRate New exchange rate (tokenIn per tokenOut, scaled by 1e18)
+     * @notice Set the exchange rate (USDC per WBTC)
+     * @param _usdcPerWbtc New rate (scaled by 1e18)
      */
-    function setExchangeRate(uint256 _exchangeRate) external {
-        exchangeRate = _exchangeRate;
+    function setExchangeRate(uint256 _usdcPerWbtc) external {
+        usdcPerWbtc = _usdcPerWbtc;
+        wbtcPerUsdc = 1e36 / _usdcPerWbtc;
     }
 
     /**
@@ -56,7 +64,7 @@ contract MockSwapRouter is ISwapRouter {
 
     /**
      * @notice Simulate exactOutputSingle swap
-     * @dev Calculates amountIn based on exchangeRate, transfers tokens
+     * @dev Calculates amountIn based on exchange rate and token direction
      */
     function exactOutputSingle(ExactOutputSingleParams calldata params)
         external
@@ -69,19 +77,32 @@ contract MockSwapRouter is ISwapRouter {
         lastAmountOut = params.amountOut;
         lastAmountInMaximum = params.amountInMaximum;
 
-        // Calculate amountIn based on exchange rate
-        // amountIn = amountOut * exchangeRate / 1e18
-        // Adjust for decimal differences
-        // tokenOut has tokenOutDecimals, tokenIn has tokenInDecimals
-        // exchangeRate is in 1e18 precision
-        amountIn = (params.amountOut * exchangeRate) / 1e18;
+        uint8 tokenInDecimals = IERC20Metadata(params.tokenIn).decimals();
+        uint8 tokenOutDecimals = IERC20Metadata(params.tokenOut).decimals();
 
-        // Adjust for decimal difference between tokens
-        // If tokenOut=8 decimals, tokenIn=6 decimals, we need to divide by 100
-        if (tokenOutDecimals > tokenInDecimals) {
-            amountIn = amountIn / (10 ** (tokenOutDecimals - tokenInDecimals));
-        } else if (tokenInDecimals > tokenOutDecimals) {
-            amountIn = amountIn * (10 ** (tokenInDecimals - tokenOutDecimals));
+        // Determine direction and calculate amountIn
+        if (params.tokenIn == usdcToken && params.tokenOut == wbtcToken) {
+            // Buying WBTC with USDC
+            // amountIn (USDC) = amountOut (WBTC) * usdcPerWbtc / 1e18
+            amountIn = (params.amountOut * usdcPerWbtc) / 1e18;
+            // Adjust for decimal difference (WBTC=8, USDC=6)
+            if (tokenOutDecimals > tokenInDecimals) {
+                amountIn = amountIn / (10 ** (tokenOutDecimals - tokenInDecimals));
+            } else if (tokenInDecimals > tokenOutDecimals) {
+                amountIn = amountIn * (10 ** (tokenInDecimals - tokenOutDecimals));
+            }
+        } else if (params.tokenIn == wbtcToken && params.tokenOut == usdcToken) {
+            // Buying USDC with WBTC
+            // amountIn (WBTC) = amountOut (USDC) * wbtcPerUsdc / 1e18
+            amountIn = (params.amountOut * wbtcPerUsdc) / 1e18;
+            // Adjust for decimal difference (USDC=6, WBTC=8)
+            if (tokenOutDecimals > tokenInDecimals) {
+                amountIn = amountIn / (10 ** (tokenOutDecimals - tokenInDecimals));
+            } else if (tokenInDecimals > tokenOutDecimals) {
+                amountIn = amountIn * (10 ** (tokenInDecimals - tokenOutDecimals));
+            }
+        } else {
+            revert("Unknown token pair");
         }
 
         lastAmountIn = amountIn;
@@ -100,14 +121,5 @@ contract MockSwapRouter is ISwapRouter {
         IERC20(params.tokenOut).safeTransfer(params.recipient, params.amountOut);
 
         return amountIn;
-    }
-
-    /**
-     * @notice Mint tokenOut to this contract for swap simulation
-     * @dev Call this before testing swaps
-     */
-    function mintTokenOut(address token, uint256 amount) external {
-        // This is a mock - we assume the token is a MockERC20 with public mint
-        // In tests, we'll transfer tokens to this contract directly
     }
 }
