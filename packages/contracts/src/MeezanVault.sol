@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {RiskLevel, getTargetAllocations} from "./RiskPresets.sol";
 
 /**
  * @title MeezanVault
@@ -13,7 +14,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  * Architecture notes:
  * - Owner is immutable and set at deployment (msg.sender)
  * - Token addresses are immutable (WBTC as tokenA, stablecoin as tokenB)
- * - Target allocation is set at construction (basis points, sum = 10000)
+ * - Risk level and target allocations are set at construction and immutable
  * - No internal balance tracking; uses on-chain balanceOf() directly
  * - No swaps in v1; rebalancing logic will be added later
  * - Withdrawals are always instant and unrestricted for the owner
@@ -26,7 +27,6 @@ contract MeezanVault {
     // ─────────────────────────────────────────────────────────────────────
 
     error OnlyOwner();
-    error InvalidAllocation();
     error ZeroAmount();
     error ZeroAddress();
     error IdenticalTokens();
@@ -52,6 +52,9 @@ contract MeezanVault {
     /// @notice Token B (e.g., USDC)
     IERC20 public immutable tokenB;
 
+    /// @notice The selected risk level for this vault
+    RiskLevel public immutable riskLevel;
+
     /// @notice Target allocation for token A in basis points (0-10000)
     uint16 public immutable targetPctA;
 
@@ -72,22 +75,23 @@ contract MeezanVault {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Creates a new vault for the caller
+     * @notice Creates a new vault for the caller with a predefined risk level
      * @param _tokenA Address of token A (e.g., WBTC)
      * @param _tokenB Address of token B (e.g., USDC)
-     * @param _targetPctA Target allocation for token A in basis points
-     * @param _targetPctB Target allocation for token B in basis points
+     * @param _riskLevel The risk level determining target allocations
      */
-    constructor(address _tokenA, address _tokenB, uint16 _targetPctA, uint16 _targetPctB) {
+    constructor(address _tokenA, address _tokenB, RiskLevel _riskLevel) {
         if (_tokenA == address(0) || _tokenB == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
-        if (_targetPctA + _targetPctB != 10000) revert InvalidAllocation();
 
         owner = msg.sender;
         tokenA = IERC20(_tokenA);
         tokenB = IERC20(_tokenB);
-        targetPctA = _targetPctA;
-        targetPctB = _targetPctB;
+        riskLevel = _riskLevel;
+
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(_riskLevel);
+        targetPctA = pctA;
+        targetPctB = pctB;
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {MeezanVault} from "../src/MeezanVault.sol";
+import {RiskLevel, getTargetAllocations} from "../src/RiskPresets.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /**
@@ -24,13 +25,8 @@ contract MeezanVaultTest is Test {
         tokenA = new MockERC20("Wrapped Bitcoin", "WBTC", 8);
         tokenB = new MockERC20("USD Coin", "USDC", 6);
 
-        // Deploy vault with 50/50 allocation
-        vault = new MeezanVault(
-            address(tokenA),
-            address(tokenB),
-            5000, // 50% token A
-            5000 // 50% token B
-        );
+        // Deploy vault with Balanced risk level
+        vault = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.Balanced);
 
         // Mint tokens to owner
         tokenA.mint(owner, INITIAL_BALANCE);
@@ -39,6 +35,52 @@ contract MeezanVaultTest is Test {
         // Approve vault to spend tokens
         tokenA.approve(address(vault), type(uint256).max);
         tokenB.approve(address(vault), type(uint256).max);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Risk Presets Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_VeryConservativeAllocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.VeryConservative);
+        assertEq(pctA, 1000, "VeryConservative: pctA should be 1000");
+        assertEq(pctB, 9000, "VeryConservative: pctB should be 9000");
+        assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
+    }
+
+    function test_ConservativeAllocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Conservative);
+        assertEq(pctA, 2500, "Conservative: pctA should be 2500");
+        assertEq(pctB, 7500, "Conservative: pctB should be 7500");
+        assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
+    }
+
+    function test_BalancedAllocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Balanced);
+        assertEq(pctA, 5000, "Balanced: pctA should be 5000");
+        assertEq(pctB, 5000, "Balanced: pctB should be 5000");
+        assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
+    }
+
+    function test_GrowthAllocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Growth);
+        assertEq(pctA, 7500, "Growth: pctA should be 7500");
+        assertEq(pctB, 2500, "Growth: pctB should be 2500");
+        assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
+    }
+
+    function test_AggressiveAllocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Aggressive);
+        assertEq(pctA, 9000, "Aggressive: pctA should be 9000");
+        assertEq(pctB, 1000, "Aggressive: pctB should be 1000");
+        assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
+    }
+
+    function test_AllRiskLevelsSumTo10000() public pure {
+        for (uint8 i = 0; i <= uint8(RiskLevel.Aggressive); i++) {
+            (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel(i));
+            assertEq(pctA + pctB, 10000, "All risk levels must sum to 10000");
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -54,30 +96,62 @@ contract MeezanVaultTest is Test {
         assertEq(address(vault.tokenB()), address(tokenB), "Token B mismatch");
     }
 
-    function test_AllocationSetCorrectly() public view {
-        (uint16 pctA, uint16 pctB) = vault.targetAllocations();
-        assertEq(pctA, 5000, "Target pct A should be 5000");
-        assertEq(pctB, 5000, "Target pct B should be 5000");
+    function test_RiskLevelSetCorrectly() public view {
+        assertEq(uint8(vault.riskLevel()), uint8(RiskLevel.Balanced), "Risk level should be Balanced");
     }
 
-    function test_RevertInvalidAllocation() public {
-        vm.expectRevert(MeezanVault.InvalidAllocation.selector);
-        new MeezanVault(address(tokenA), address(tokenB), 5000, 4000);
+    function test_AllocationsMatchRiskLevel() public view {
+        (uint16 pctA, uint16 pctB) = vault.targetAllocations();
+        (uint16 expectedA, uint16 expectedB) = getTargetAllocations(RiskLevel.Balanced);
+        assertEq(pctA, expectedA, "Target pct A should match Balanced preset");
+        assertEq(pctB, expectedB, "Target pct B should match Balanced preset");
+    }
+
+    function test_VaultWithVeryConservative() public {
+        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.VeryConservative);
+        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.VeryConservative));
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 1000);
+        assertEq(pctB, 9000);
+    }
+
+    function test_VaultWithConservative() public {
+        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.Conservative);
+        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Conservative));
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 2500);
+        assertEq(pctB, 7500);
+    }
+
+    function test_VaultWithGrowth() public {
+        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.Growth);
+        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Growth));
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 7500);
+        assertEq(pctB, 2500);
+    }
+
+    function test_VaultWithAggressive() public {
+        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.Aggressive);
+        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Aggressive));
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 9000);
+        assertEq(pctB, 1000);
     }
 
     function test_RevertZeroAddressTokenA() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(0), address(tokenB), 5000, 5000);
+        new MeezanVault(address(0), address(tokenB), RiskLevel.Balanced);
     }
 
     function test_RevertZeroAddressTokenB() public {
         vm.expectRevert(MeezanVault.ZeroAddress.selector);
-        new MeezanVault(address(tokenA), address(0), 5000, 5000);
+        new MeezanVault(address(tokenA), address(0), RiskLevel.Balanced);
     }
 
     function test_RevertIdenticalTokens() public {
         vm.expectRevert(MeezanVault.IdenticalTokens.selector);
-        new MeezanVault(address(tokenA), address(tokenA), 5000, 5000);
+        new MeezanVault(address(tokenA), address(tokenA), RiskLevel.Balanced);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -316,15 +390,15 @@ contract MeezanVaultTest is Test {
         assertEq(balB, 0);
     }
 
-    function testFuzz_AllocationMustSumTo10000(uint16 pctA) public {
-        // Skip invalid allocations
-        vm.assume(pctA <= 10000);
-        uint16 pctB = 10000 - pctA;
+    function testFuzz_VaultWithAnyRiskLevel(uint8 levelRaw) public {
+        // Bound to valid risk levels (0-4)
+        uint8 level = uint8(bound(levelRaw, 0, 4));
 
-        MeezanVault newVault = new MeezanVault(address(tokenA), address(tokenB), pctA, pctB);
+        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel(level));
 
-        (uint16 retA, uint16 retB) = newVault.targetAllocations();
-        assertEq(retA + retB, 10000);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA + pctB, 10000, "All risk levels must sum to 10000");
+        assertEq(uint8(v.riskLevel()), level, "Risk level should be stored correctly");
     }
 
     function testFuzz_WithdrawCannotExceedBalance(uint256 depositAmt, uint256 withdrawAmt) public {
