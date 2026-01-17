@@ -17,16 +17,21 @@ contract MeezanVaultTest is Test {
 
     address public owner = address(this);
     address public attacker = address(0xBEEF);
+    address public executorAddr = address(0xE1E1);
 
     uint256 constant INITIAL_BALANCE = 1000 ether;
 
     function setUp() public {
-        // Deploy mock tokens
-        tokenA = new MockERC20("Wrapped Bitcoin", "WBTC", 8);
-        tokenB = new MockERC20("USD Coin", "USDC", 6);
+        // Deploy mock tokens (same decimals for simpler allocation math)
+        tokenA = new MockERC20("Wrapped Bitcoin", "WBTC", 18);
+        tokenB = new MockERC20("USD Coin", "USDC", 18);
 
-        // Deploy vault with Balanced risk level
-        vault = new MeezanVault(address(tokenA), address(tokenB), RiskLevel.Balanced);
+        // Deploy vault with Balanced risk level (50/50)
+        vault = new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            RiskLevel.Balanced
+        );
 
         // Mint tokens to owner
         tokenA.mint(owner, INITIAL_BALANCE);
@@ -154,15 +159,27 @@ contract MeezanVaultTest is Test {
         new MeezanVault(address(tokenA), address(tokenA), RiskLevel.Balanced);
     }
 
+    function test_ConstantsSetCorrectly() public view {
+        assertEq(vault.MIN_DRIFT_BPS(), 300, "MIN_DRIFT_BPS should be 300");
+        assertEq(vault.DEFAULT_DRIFT_BPS(), 500, "DEFAULT_DRIFT_BPS should be 500");
+        assertEq(vault.COOLDOWN_SECONDS(), 43200, "COOLDOWN_SECONDS should be 43200");
+    }
+
+    function test_InitialStateDefaults() public view {
+        assertEq(vault.lastRebalanceAt(), 0, "lastRebalanceAt should be 0");
+        assertEq(vault.autoRebalanceEnabled(), false, "autoRebalanceEnabled should be false");
+        assertEq(vault.executor(), address(0), "executor should be address(0)");
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Deposit Tests
     // ─────────────────────────────────────────────────────────────────────
 
     function test_DepositTokenA() public {
         uint256 depositAmount = 100 ether;
-
+        
         vault.depositTokenA(depositAmount);
-
+        
         (uint256 balA, uint256 balB) = vault.holdings();
         assertEq(balA, depositAmount, "Balance A should match deposit");
         assertEq(balB, 0, "Balance B should be zero");
@@ -170,9 +187,9 @@ contract MeezanVaultTest is Test {
 
     function test_DepositTokenB() public {
         uint256 depositAmount = 200 ether;
-
+        
         vault.depositTokenB(depositAmount);
-
+        
         (uint256 balA, uint256 balB) = vault.holdings();
         assertEq(balA, 0, "Balance A should be zero");
         assertEq(balB, depositAmount, "Balance B should match deposit");
@@ -221,26 +238,26 @@ contract MeezanVaultTest is Test {
 
     function test_WithdrawTokenA() public {
         vault.depositTokenA(100 ether);
-
+        
         uint256 balanceBefore = tokenA.balanceOf(owner);
         vault.withdrawTokenA(40 ether);
         uint256 balanceAfter = tokenA.balanceOf(owner);
 
         assertEq(balanceAfter - balanceBefore, 40 ether, "Should receive 40 tokens");
-
+        
         (uint256 balA,) = vault.holdings();
         assertEq(balA, 60 ether, "Vault should have 60 remaining");
     }
 
     function test_WithdrawTokenB() public {
         vault.depositTokenB(100 ether);
-
+        
         uint256 balanceBefore = tokenB.balanceOf(owner);
         vault.withdrawTokenB(30 ether);
         uint256 balanceAfter = tokenB.balanceOf(owner);
 
         assertEq(balanceAfter - balanceBefore, 30 ether, "Should receive 30 tokens");
-
+        
         (, uint256 balB) = vault.holdings();
         assertEq(balB, 70 ether, "Vault should have 70 remaining");
     }
@@ -314,7 +331,7 @@ contract MeezanVaultTest is Test {
 
     function test_WithdrawAllEmpty() public {
         (uint256 amountA, uint256 amountB) = vault.withdrawAll();
-
+        
         assertEq(amountA, 0, "Should return 0 for A");
         assertEq(amountB, 0, "Should return 0 for B");
     }
@@ -335,6 +352,48 @@ contract MeezanVaultTest is Test {
         vm.prank(attacker);
         vm.expectRevert(MeezanVault.OnlyOwner.selector);
         vault.withdrawAll();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Executor/AutoRebalance Configuration Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_SetExecutor() public {
+        vm.expectEmit(true, true, false, false);
+        emit MeezanVault.ExecutorSet(address(0), executorAddr);
+        vault.setExecutor(executorAddr);
+
+        assertEq(vault.executor(), executorAddr, "Executor should be set");
+    }
+
+    function test_SetExecutorToZero() public {
+        vault.setExecutor(executorAddr);
+        vault.setExecutor(address(0));
+
+        assertEq(vault.executor(), address(0), "Executor should be cleared");
+    }
+
+    function test_RevertSetExecutorNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.setExecutor(executorAddr);
+    }
+
+    function test_SetAutoRebalanceEnabled() public {
+        vm.expectEmit(false, false, false, true);
+        emit MeezanVault.AutoRebalanceToggled(true);
+        vault.setAutoRebalanceEnabled(true);
+
+        assertEq(vault.autoRebalanceEnabled(), true, "Auto rebalance should be enabled");
+
+        vault.setAutoRebalanceEnabled(false);
+        assertEq(vault.autoRebalanceEnabled(), false, "Auto rebalance should be disabled");
+    }
+
+    function test_RevertSetAutoRebalanceNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.setAutoRebalanceEnabled(true);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -368,6 +427,242 @@ contract MeezanVaultTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // Current Allocations & Drift Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_CurrentAllocationsEmpty() public view {
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA, 0, "Empty vault pctA should be 0");
+        assertEq(pctB, 0, "Empty vault pctB should be 0");
+    }
+
+    function test_CurrentAllocationsBalanced() public {
+        // 50/50 deposit
+        vault.depositTokenA(100 ether);
+        vault.depositTokenB(100 ether);
+
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA, 5000, "50/50 should give pctA = 5000");
+        assertEq(pctB, 5000, "50/50 should give pctB = 5000");
+    }
+
+    function test_CurrentAllocationsSkewed() public {
+        // 80/20 deposit (80% token A)
+        vault.depositTokenA(80 ether);
+        vault.depositTokenB(20 ether);
+
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA, 8000, "80/20 should give pctA = 8000");
+        assertEq(pctB, 2000, "80/20 should give pctB = 2000");
+    }
+
+    function test_CurrentAllocationsOnlyTokenA() public {
+        vault.depositTokenA(100 ether);
+
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA, 10000, "100% A should give pctA = 10000");
+        assertEq(pctB, 0, "100% A should give pctB = 0");
+    }
+
+    function test_CurrentAllocationsOnlyTokenB() public {
+        vault.depositTokenB(100 ether);
+
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA, 0, "100% B should give pctA = 0");
+        assertEq(pctB, 10000, "100% B should give pctB = 10000");
+    }
+
+    function test_DriftBpsZeroWhenEmpty() public view {
+        uint16 drift = vault.driftBps();
+        // Empty vault: currentPctA = 0, targetPctA = 5000, drift = 5000
+        assertEq(drift, 5000, "Empty vault drift should be 5000 (target is 50%)");
+    }
+
+    function test_DriftBpsZeroWhenBalanced() public {
+        // Balanced vault matches target (50/50)
+        vault.depositTokenA(100 ether);
+        vault.depositTokenB(100 ether);
+
+        uint16 drift = vault.driftBps();
+        assertEq(drift, 0, "Balanced vault should have 0 drift");
+    }
+
+    function test_DriftBpsWhenOverAllocatedToA() public {
+        // 60% A / 40% B, target is 50/50
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        uint16 drift = vault.driftBps();
+        assertEq(drift, 1000, "60/40 should have drift of 1000 bps (10%)");
+    }
+
+    function test_DriftBpsWhenUnderAllocatedToA() public {
+        // 40% A / 60% B, target is 50/50
+        vault.depositTokenA(40 ether);
+        vault.depositTokenB(60 ether);
+
+        uint16 drift = vault.driftBps();
+        assertEq(drift, 1000, "40/60 should have drift of 1000 bps (10%)");
+    }
+
+    function test_DriftBpsExactlyAtThreshold() public {
+        // 55% A / 45% B = 500 bps drift
+        vault.depositTokenA(55 ether);
+        vault.depositTokenB(45 ether);
+
+        uint16 drift = vault.driftBps();
+        assertEq(drift, 500, "55/45 should have drift of 500 bps (5%)");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Rebalance Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_RebalanceRevertsIfDriftTooLow() public {
+        // 50/50 deposit matches target exactly
+        vault.depositTokenA(100 ether);
+        vault.depositTokenB(100 ether);
+
+        vm.expectRevert(MeezanVault.DriftTooLow.selector);
+        vault.rebalance();
+    }
+
+    function test_RebalanceRevertsIfDriftJustBelowThreshold() public {
+        // 54/46 = 400 bps drift (below 500 threshold)
+        vault.depositTokenA(54 ether);
+        vault.depositTokenB(46 ether);
+
+        assertEq(vault.driftBps(), 400, "Should be 400 bps drift");
+
+        vm.expectRevert(MeezanVault.DriftTooLow.selector);
+        vault.rebalance();
+    }
+
+    function test_RebalanceSucceedsWhenDriftMeetsThreshold() public {
+        // 55/45 = 500 bps drift (exactly at threshold)
+        vault.depositTokenA(55 ether);
+        vault.depositTokenB(45 ether);
+
+        vault.rebalance();
+
+        assertEq(vault.lastRebalanceAt(), block.timestamp, "lastRebalanceAt should be updated");
+    }
+
+    function test_RebalanceEnforcesCooldown() public {
+        // Create enough drift (60/40 = 1000 bps)
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        // First rebalance succeeds
+        vault.rebalance();
+
+        // Immediate second rebalance fails
+        vm.expectRevert(MeezanVault.CooldownNotElapsed.selector);
+        vault.rebalance();
+
+        // After cooldown, it should work
+        vm.warp(block.timestamp + vault.COOLDOWN_SECONDS());
+        vault.rebalance();
+    }
+
+    function test_RebalanceEmitsEventSellA() public {
+        // 60% A / 40% B => over-allocated to A, should sell A
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.RebalancePlanned(
+            owner,
+            address(tokenA), // sellToken
+            address(tokenB), // buyToken
+            1000,            // driftBps
+            6000,            // currentPctA
+            5000,            // targetPctA
+            uint64(block.timestamp)
+        );
+
+        vault.rebalance();
+    }
+
+    function test_RebalanceEmitsEventSellB() public {
+        // 40% A / 60% B => under-allocated to A, should sell B
+        vault.depositTokenA(40 ether);
+        vault.depositTokenB(60 ether);
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.RebalancePlanned(
+            owner,
+            address(tokenB), // sellToken
+            address(tokenA), // buyToken
+            1000,            // driftBps
+            4000,            // currentPctA
+            5000,            // targetPctA
+            uint64(block.timestamp)
+        );
+
+        vault.rebalance();
+    }
+
+    function test_RebalanceOwnerCanAlwaysCall() public {
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        // Owner can call even without executor or autoRebalance enabled
+        vault.rebalance();
+
+        assertGt(vault.lastRebalanceAt(), 0, "Rebalance should have occurred");
+    }
+
+    function test_RebalanceExecutorCannotCallWhenNotEnabled() public {
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        vault.setExecutor(executorAddr);
+        // autoRebalanceEnabled is still false
+
+        vm.prank(executorAddr);
+        vm.expectRevert(MeezanVault.OnlyOwnerOrExecutor.selector);
+        vault.rebalance();
+    }
+
+    function test_RebalanceExecutorCannotCallWhenNotSet() public {
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        vault.setAutoRebalanceEnabled(true);
+        // executor is still address(0)
+
+        vm.prank(executorAddr);
+        vm.expectRevert(MeezanVault.OnlyOwnerOrExecutor.selector);
+        vault.rebalance();
+    }
+
+    function test_RebalanceExecutorCanCallWhenEnabledAndSet() public {
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        vault.setExecutor(executorAddr);
+        vault.setAutoRebalanceEnabled(true);
+
+        vm.prank(executorAddr);
+        vault.rebalance();
+
+        assertGt(vault.lastRebalanceAt(), 0, "Rebalance should have occurred");
+    }
+
+    function test_RebalanceRandomAddressCannotCall() public {
+        vault.depositTokenA(60 ether);
+        vault.depositTokenB(40 ether);
+
+        vault.setExecutor(executorAddr);
+        vault.setAutoRebalanceEnabled(true);
+
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwnerOrExecutor.selector);
+        vault.rebalance();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // Fuzz Tests
     // ─────────────────────────────────────────────────────────────────────
 
@@ -393,8 +688,12 @@ contract MeezanVaultTest is Test {
     function testFuzz_VaultWithAnyRiskLevel(uint8 levelRaw) public {
         // Bound to valid risk levels (0-4)
         uint8 level = uint8(bound(levelRaw, 0, 4));
-
-        MeezanVault v = new MeezanVault(address(tokenA), address(tokenB), RiskLevel(level));
+        
+        MeezanVault v = new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            RiskLevel(level)
+        );
 
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA + pctB, 10000, "All risk levels must sum to 10000");
@@ -409,5 +708,30 @@ contract MeezanVaultTest is Test {
 
         vm.expectRevert(MeezanVault.InsufficientBalance.selector);
         vault.withdrawTokenA(withdrawAmt);
+    }
+
+    function testFuzz_CurrentAllocationsSumTo10000(uint256 amountA, uint256 amountB) public {
+        // At least 1 wei in each to avoid division issues
+        amountA = bound(amountA, 1, INITIAL_BALANCE);
+        amountB = bound(amountB, 1, INITIAL_BALANCE);
+
+        vault.depositTokenA(amountA);
+        vault.depositTokenB(amountB);
+
+        (uint16 pctA, uint16 pctB) = vault.currentAllocationsBps();
+        assertEq(pctA + pctB, 10000, "Current allocations should sum to 10000");
+    }
+
+    function testFuzz_DriftIsSymmetric(uint256 amountA, uint256 amountB) public {
+        amountA = bound(amountA, 1 ether, INITIAL_BALANCE);
+        amountB = bound(amountB, 1 ether, INITIAL_BALANCE);
+
+        vault.depositTokenA(amountA);
+        vault.depositTokenB(amountB);
+
+        uint16 drift = vault.driftBps();
+        
+        // Drift should be <= 5000 (max 50% deviation from 50% target)
+        assertLe(drift, 5000, "Drift should be <= 5000 bps");
     }
 }

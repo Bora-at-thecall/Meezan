@@ -8,29 +8,44 @@ import {RiskLevel, getTargetAllocations} from "./RiskPresets.sol";
 /**
  * @title MeezanVault
  * @notice A non-custodial, single-owner vault for holding a two-token portfolio.
- * @dev Designed for long-term holding with manual rebalancing. One vault per user.
- *      Future versions may add an authorized executor for opt-in automation.
+ * @dev Designed for long-term holding with rule-based rebalancing. One vault per user.
  *
  * Architecture notes:
  * - Owner is immutable and set at deployment (msg.sender)
  * - Token addresses are immutable (WBTC as tokenA, stablecoin as tokenB)
  * - Risk level and target allocations are set at construction and immutable
  * - No internal balance tracking; uses on-chain balanceOf() directly
- * - No swaps in v1; rebalancing logic will be added later
+ * - Rebalancing is triggered by % drift only; time is a safety cooldown, not a trigger
  * - Withdrawals are always instant and unrestricted for the owner
  */
 contract MeezanVault {
     using SafeERC20 for IERC20;
 
     // ─────────────────────────────────────────────────────────────────────
+    // Constants
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Minimum allowed drift threshold (3%)
+    uint16 public constant MIN_DRIFT_BPS = 300;
+
+    /// @notice Default drift threshold to trigger rebalance (5%)
+    uint16 public constant DEFAULT_DRIFT_BPS = 500;
+
+    /// @notice Minimum time between rebalances (12 hours)
+    uint32 public constant COOLDOWN_SECONDS = 43200;
+
+    // ─────────────────────────────────────────────────────────────────────
     // Errors
     // ─────────────────────────────────────────────────────────────────────
 
     error OnlyOwner();
+    error OnlyOwnerOrExecutor();
     error ZeroAmount();
     error ZeroAddress();
     error IdenticalTokens();
     error InsufficientBalance();
+    error DriftTooLow();
+    error CooldownNotElapsed();
 
     // ─────────────────────────────────────────────────────────────────────
     // Events
@@ -38,6 +53,17 @@ contract MeezanVault {
 
     event Deposit(address indexed owner, address indexed token, uint256 amount);
     event Withdraw(address indexed owner, address indexed token, uint256 amount);
+    event ExecutorSet(address indexed previousExecutor, address indexed newExecutor);
+    event AutoRebalanceToggled(bool enabled);
+    event RebalancePlanned(
+        address indexed caller,
+        address indexed sellToken,
+        address indexed buyToken,
+        uint16 driftBps,
+        uint16 currentPctA,
+        uint16 targetPctA,
+        uint64 timestamp
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // Immutable State
@@ -62,12 +88,35 @@ contract MeezanVault {
     uint16 public immutable targetPctB;
 
     // ─────────────────────────────────────────────────────────────────────
+    // Mutable State
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Timestamp of last rebalance
+    uint64 public lastRebalanceAt;
+
+    /// @notice Whether automatic rebalancing by executor is enabled
+    bool public autoRebalanceEnabled;
+
+    /// @notice Address authorized to call rebalance when auto-rebalance is enabled
+    address public executor;
+
+    // ─────────────────────────────────────────────────────────────────────
     // Modifiers
     // ─────────────────────────────────────────────────────────────────────
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
         _;
+    }
+
+    modifier onlyOwnerOrExecutor() {
+        if (msg.sender == owner) {
+            _;
+        } else if (autoRebalanceEnabled && executor != address(0) && msg.sender == executor) {
+            _;
+        } else {
+            revert OnlyOwnerOrExecutor();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -80,7 +129,11 @@ contract MeezanVault {
      * @param _tokenB Address of token B (e.g., USDC)
      * @param _riskLevel The risk level determining target allocations
      */
-    constructor(address _tokenA, address _tokenB, RiskLevel _riskLevel) {
+    constructor(
+        address _tokenA,
+        address _tokenB,
+        RiskLevel _riskLevel
+    ) {
         if (_tokenA == address(0) || _tokenB == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
 
@@ -92,6 +145,29 @@ contract MeezanVault {
         (uint16 pctA, uint16 pctB) = getTargetAllocations(_riskLevel);
         targetPctA = pctA;
         targetPctB = pctB;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Owner Configuration
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Set the executor address for automated rebalancing
+     * @param newExecutor The new executor address (can be address(0) to disable)
+     */
+    function setExecutor(address newExecutor) external onlyOwner {
+        address previousExecutor = executor;
+        executor = newExecutor;
+        emit ExecutorSet(previousExecutor, newExecutor);
+    }
+
+    /**
+     * @notice Enable or disable automatic rebalancing by executor
+     * @param enabled Whether to enable auto-rebalance
+     */
+    function setAutoRebalanceEnabled(bool enabled) external onlyOwner {
+        autoRebalanceEnabled = enabled;
+        emit AutoRebalanceToggled(enabled);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -164,6 +240,53 @@ contract MeezanVault {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // Rebalancing
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Plan a rebalance operation (no swap executed yet)
+     * @dev Callable by owner always, or by executor if auto-rebalance is enabled.
+     *      Enforces drift threshold and cooldown period.
+     *      Emits RebalancePlanned with direction info for off-chain execution.
+     */
+    function rebalance() external onlyOwnerOrExecutor {
+        uint16 drift = driftBps();
+        if (drift < DEFAULT_DRIFT_BPS) revert DriftTooLow();
+
+        // Allow first rebalance (lastRebalanceAt == 0), otherwise enforce cooldown
+        if (lastRebalanceAt != 0 && block.timestamp - lastRebalanceAt < COOLDOWN_SECONDS) {
+            revert CooldownNotElapsed();
+        }
+
+        (uint16 currentPctA,) = currentAllocationsBps();
+
+        // Determine direction
+        address sellToken;
+        address buyToken;
+        if (currentPctA > targetPctA) {
+            // Over-allocated to A, sell A for B
+            sellToken = address(tokenA);
+            buyToken = address(tokenB);
+        } else {
+            // Under-allocated to A, sell B for A
+            sellToken = address(tokenB);
+            buyToken = address(tokenA);
+        }
+
+        lastRebalanceAt = uint64(block.timestamp);
+
+        emit RebalancePlanned(
+            msg.sender,
+            sellToken,
+            buyToken,
+            drift,
+            currentPctA,
+            targetPctA,
+            uint64(block.timestamp)
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // View Functions
     // ─────────────────────────────────────────────────────────────────────
 
@@ -183,5 +306,39 @@ contract MeezanVault {
      */
     function targetAllocations() external view returns (uint16 pctA, uint16 pctB) {
         return (targetPctA, targetPctB);
+    }
+
+    /**
+     * @notice Returns current allocation percentages based on actual balances
+     * @dev Uses raw balance comparison. For value-based allocation, a price oracle would be needed.
+     * @return pctA Current percentage for token A (basis points)
+     * @return pctB Current percentage for token B (basis points)
+     */
+    function currentAllocationsBps() public view returns (uint16 pctA, uint16 pctB) {
+        uint256 balA = tokenA.balanceOf(address(this));
+        uint256 balB = tokenB.balanceOf(address(this));
+        uint256 total = balA + balB;
+
+        if (total == 0) {
+            return (0, 0);
+        }
+
+        pctA = uint16((balA * 10000) / total);
+        pctB = uint16(10000 - pctA);
+    }
+
+    /**
+     * @notice Returns the current drift from target allocation
+     * @dev Drift = |currentPctA - targetPctA|
+     * @return drift The absolute drift in basis points
+     */
+    function driftBps() public view returns (uint16) {
+        (uint16 currentPctA,) = currentAllocationsBps();
+
+        if (currentPctA >= targetPctA) {
+            return currentPctA - targetPctA;
+        } else {
+            return targetPctA - currentPctA;
+        }
     }
 }
