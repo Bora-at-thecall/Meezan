@@ -2,8 +2,11 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {RiskLevel, getTargetAllocations} from "./RiskPresets.sol";
+import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 
 /**
  * @title MeezanVault
@@ -14,8 +17,9 @@ import {RiskLevel, getTargetAllocations} from "./RiskPresets.sol";
  * - Owner is immutable and set at deployment (msg.sender)
  * - Token addresses are immutable (WBTC as tokenA, stablecoin as tokenB)
  * - Risk level and target allocations are set at construction and immutable
- * - No internal balance tracking; uses on-chain balanceOf() directly
- * - Rebalancing is triggered by % drift only; time is a safety cooldown, not a trigger
+ * - Uses Chainlink price feeds for value-based allocation calculations
+ * - Rebalancing is triggered by % drift only; time is a safety cooldown for executor
+ * - Owner can bypass cooldown; executor must respect it
  * - Withdrawals are always instant and unrestricted for the owner
  */
 contract MeezanVault {
@@ -25,14 +29,17 @@ contract MeezanVault {
     // Constants
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @notice Minimum allowed drift threshold (3%)
-    uint16 public constant MIN_DRIFT_BPS = 300;
-
     /// @notice Default drift threshold to trigger rebalance (5%)
     uint16 public constant DEFAULT_DRIFT_BPS = 500;
 
-    /// @notice Minimum time between rebalances (12 hours)
+    /// @notice Minimum time between rebalances for executor (12 hours)
     uint32 public constant COOLDOWN_SECONDS = 43200;
+
+    /// @notice Maximum allowed price staleness (1 hour)
+    uint32 public constant MAX_PRICE_STALENESS = 3600;
+
+    /// @notice Standard precision for USD values (18 decimals)
+    uint256 private constant USD_PRECISION = 1e18;
 
     // ─────────────────────────────────────────────────────────────────────
     // Errors
@@ -46,6 +53,12 @@ contract MeezanVault {
     error InsufficientBalance();
     error DriftTooLow();
     error CooldownNotElapsed();
+    error EmptyVault();
+    error InvalidPrice();
+    error StalePrice();
+    error IncompleteRound();
+    error InvalidTokenDecimals();
+    error InvalidFeedDecimals();
 
     // ─────────────────────────────────────────────────────────────────────
     // Events
@@ -77,6 +90,24 @@ contract MeezanVault {
 
     /// @notice Token B (e.g., USDC)
     IERC20 public immutable tokenB;
+
+    /// @notice Price feed for token A (e.g., BTC/USD)
+    AggregatorV3Interface public immutable priceFeedA;
+
+    /// @notice Price feed for token B (e.g., USDC/USD)
+    AggregatorV3Interface public immutable priceFeedB;
+
+    /// @notice Decimals for token A
+    uint8 public immutable tokenDecimalsA;
+
+    /// @notice Decimals for token B
+    uint8 public immutable tokenDecimalsB;
+
+    /// @notice Decimals for price feed A
+    uint8 public immutable feedDecimalsA;
+
+    /// @notice Decimals for price feed B
+    uint8 public immutable feedDecimalsB;
 
     /// @notice The selected risk level for this vault
     RiskLevel public immutable riskLevel;
@@ -110,13 +141,10 @@ contract MeezanVault {
     }
 
     modifier onlyOwnerOrExecutor() {
-        if (msg.sender == owner) {
-            _;
-        } else if (autoRebalanceEnabled && executor != address(0) && msg.sender == executor) {
-            _;
-        } else {
-            revert OnlyOwnerOrExecutor();
-        }
+        bool isOwner = msg.sender == owner;
+        bool isAuthorizedExecutor = autoRebalanceEnabled && executor != address(0) && msg.sender == executor;
+        if (!isOwner && !isAuthorizedExecutor) revert OnlyOwnerOrExecutor();
+        _;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -127,19 +155,34 @@ contract MeezanVault {
      * @notice Creates a new vault for the caller with a predefined risk level
      * @param _tokenA Address of token A (e.g., WBTC)
      * @param _tokenB Address of token B (e.g., USDC)
+     * @param _priceFeedA Chainlink price feed for token A (e.g., BTC/USD)
+     * @param _priceFeedB Chainlink price feed for token B (e.g., USDC/USD)
      * @param _riskLevel The risk level determining target allocations
      */
-    constructor(
-        address _tokenA,
-        address _tokenB,
-        RiskLevel _riskLevel
-    ) {
+    constructor(address _tokenA, address _tokenB, address _priceFeedA, address _priceFeedB, RiskLevel _riskLevel) {
         if (_tokenA == address(0) || _tokenB == address(0)) revert ZeroAddress();
+        if (_priceFeedA == address(0) || _priceFeedB == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
+
+        // Cache and validate token decimals
+        uint8 _tokenDecimalsA = IERC20Metadata(_tokenA).decimals();
+        uint8 _tokenDecimalsB = IERC20Metadata(_tokenB).decimals();
+        if (_tokenDecimalsA > 18 || _tokenDecimalsB > 18) revert InvalidTokenDecimals();
+
+        // Cache and validate feed decimals
+        uint8 _feedDecimalsA = AggregatorV3Interface(_priceFeedA).decimals();
+        uint8 _feedDecimalsB = AggregatorV3Interface(_priceFeedB).decimals();
+        if (_feedDecimalsA > 18 || _feedDecimalsB > 18) revert InvalidFeedDecimals();
 
         owner = msg.sender;
         tokenA = IERC20(_tokenA);
         tokenB = IERC20(_tokenB);
+        priceFeedA = AggregatorV3Interface(_priceFeedA);
+        priceFeedB = AggregatorV3Interface(_priceFeedB);
+        tokenDecimalsA = _tokenDecimalsA;
+        tokenDecimalsB = _tokenDecimalsB;
+        feedDecimalsA = _feedDecimalsA;
+        feedDecimalsB = _feedDecimalsB;
         riskLevel = _riskLevel;
 
         (uint16 pctA, uint16 pctB) = getTargetAllocations(_riskLevel);
@@ -245,17 +288,24 @@ contract MeezanVault {
 
     /**
      * @notice Plan a rebalance operation (no swap executed yet)
-     * @dev Callable by owner always, or by executor if auto-rebalance is enabled.
-     *      Enforces drift threshold and cooldown period.
+     * @dev Callable by owner always (bypasses cooldown), or by executor if auto-rebalance is enabled.
+     *      Executor must respect cooldown; owner does not.
+     *      Enforces drift threshold. Reverts on empty vault.
      *      Emits RebalancePlanned with direction info for off-chain execution.
      */
     function rebalance() external onlyOwnerOrExecutor {
+        // Check for empty vault
+        (uint256 valueA, uint256 valueB) = _getUsdValues();
+        if (valueA + valueB == 0) revert EmptyVault();
+
         uint16 drift = driftBps();
         if (drift < DEFAULT_DRIFT_BPS) revert DriftTooLow();
 
-        // Allow first rebalance (lastRebalanceAt == 0), otherwise enforce cooldown
-        if (lastRebalanceAt != 0 && block.timestamp - lastRebalanceAt < COOLDOWN_SECONDS) {
-            revert CooldownNotElapsed();
+        // Executor must respect cooldown; owner can bypass
+        if (msg.sender != owner) {
+            if (lastRebalanceAt != 0 && block.timestamp - lastRebalanceAt < COOLDOWN_SECONDS) {
+                revert CooldownNotElapsed();
+            }
         }
 
         (uint16 currentPctA,) = currentAllocationsBps();
@@ -275,15 +325,7 @@ contract MeezanVault {
 
         lastRebalanceAt = uint64(block.timestamp);
 
-        emit RebalancePlanned(
-            msg.sender,
-            sellToken,
-            buyToken,
-            drift,
-            currentPctA,
-            targetPctA,
-            uint64(block.timestamp)
-        );
+        emit RebalancePlanned(msg.sender, sellToken, buyToken, drift, currentPctA, targetPctA, uint64(block.timestamp));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -309,21 +351,20 @@ contract MeezanVault {
     }
 
     /**
-     * @notice Returns current allocation percentages based on actual balances
-     * @dev Uses raw balance comparison. For value-based allocation, a price oracle would be needed.
+     * @notice Returns current allocation percentages based on USD values
+     * @dev Uses Chainlink price feeds for value-based allocation
      * @return pctA Current percentage for token A (basis points)
      * @return pctB Current percentage for token B (basis points)
      */
     function currentAllocationsBps() public view returns (uint16 pctA, uint16 pctB) {
-        uint256 balA = tokenA.balanceOf(address(this));
-        uint256 balB = tokenB.balanceOf(address(this));
-        uint256 total = balA + balB;
+        (uint256 valueA, uint256 valueB) = _getUsdValues();
+        uint256 totalValue = valueA + valueB;
 
-        if (total == 0) {
+        if (totalValue == 0) {
             return (0, 0);
         }
 
-        pctA = uint16((balA * 10000) / total);
+        pctA = uint16((valueA * 10000) / totalValue);
         pctB = uint16(10000 - pctA);
     }
 
@@ -340,5 +381,62 @@ contract MeezanVault {
         } else {
             return targetPctA - currentPctA;
         }
+    }
+
+    /**
+     * @notice Returns the USD values of holdings
+     * @return valueA USD value of token A holdings (18 decimals)
+     * @return valueB USD value of token B holdings (18 decimals)
+     */
+    function getUsdValues() external view returns (uint256 valueA, uint256 valueB) {
+        return _getUsdValues();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Internal Functions
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Calculates USD values of both token holdings
+     * @return valueA USD value of token A (18 decimals)
+     * @return valueB USD value of token B (18 decimals)
+     */
+    function _getUsdValues() internal view returns (uint256 valueA, uint256 valueB) {
+        uint256 balA = tokenA.balanceOf(address(this));
+        uint256 balB = tokenB.balanceOf(address(this));
+
+        valueA = _usdValue(balA, tokenDecimalsA, priceFeedA, feedDecimalsA);
+        valueB = _usdValue(balB, tokenDecimalsB, priceFeedB, feedDecimalsB);
+    }
+
+    /**
+     * @notice Calculates USD value of a token amount with stale price protection
+     * @param amount Token amount in token's native decimals
+     * @param tokenDecimals Number of decimals for the token
+     * @param feed Chainlink price feed for the token
+     * @param feedDecimals Number of decimals for the feed
+     * @return value USD value normalized to 18 decimals
+     */
+    function _usdValue(uint256 amount, uint8 tokenDecimals, AggregatorV3Interface feed, uint8 feedDecimals)
+        internal
+        view
+        returns (uint256 value)
+    {
+        if (amount == 0) return 0;
+
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
+
+        // Validate price data
+        if (answer <= 0) revert InvalidPrice();
+        if (updatedAt == 0) revert StalePrice();
+        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (answeredInRound < roundId) revert IncompleteRound();
+
+        // Calculate USD value using chained mulDiv to avoid overflow
+        // Step 1: Multiply amount by price, divide by token decimals
+        // Step 2: Scale to USD precision by dividing by feed decimals
+        // Result: (amount * price * USD_PRECISION) / (10^tokenDecimals * 10^feedDecimals)
+        value = Math.mulDiv(amount, uint256(answer), 10 ** tokenDecimals);
+        value = Math.mulDiv(value, USD_PRECISION, 10 ** feedDecimals);
     }
 }
