@@ -2,8 +2,9 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {MeezanVault} from "../src/MeezanVault.sol";
-import {RiskLevel, getTargetAllocations} from "../src/RiskPresets.sol";
+import {AllocationPreset, getTargetAllocations} from "../src/AllocationPresets.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
@@ -48,7 +49,7 @@ contract MeezanVaultTest is Test {
         // Exchange rate: 40000e18 means 1 WBTC = 40000 USDC (matches oracle price)
         swapRouter = new MockSwapRouter(40000e18, address(tokenA), address(tokenB));
 
-        // Deploy vault with Balanced risk level (50/50)
+        // Deploy vault with Split50_50 allocation (50/50)
         vault = new MeezanVault(
             address(tokenA),
             address(tokenB),
@@ -56,7 +57,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
 
         // Mint tokens to owner
@@ -69,10 +70,10 @@ contract MeezanVaultTest is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Helper to create vault with specific risk level
+    // Helper to create vault with specific allocation preset
     // ─────────────────────────────────────────────────────────────────────
 
-    function _createVault(RiskLevel level) internal returns (MeezanVault) {
+    function _createVault(AllocationPreset preset) internal returns (MeezanVault) {
         return new MeezanVault(
             address(tokenA),
             address(tokenB),
@@ -80,53 +81,53 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            level
+            preset
         );
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Risk Presets Tests
+    // Allocation Presets Tests
     // ─────────────────────────────────────────────────────────────────────
 
-    function test_VeryConservativeAllocations() public pure {
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.VeryConservative);
-        assertEq(pctA, 1000, "VeryConservative: pctA should be 1000");
-        assertEq(pctB, 9000, "VeryConservative: pctB should be 9000");
+    function test_Split10_90_Allocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset.Split10_90);
+        assertEq(pctA, 1000, "Split10_90: pctA should be 1000");
+        assertEq(pctB, 9000, "Split10_90: pctB should be 9000");
         assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
     }
 
-    function test_ConservativeAllocations() public pure {
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Conservative);
-        assertEq(pctA, 2500, "Conservative: pctA should be 2500");
-        assertEq(pctB, 7500, "Conservative: pctB should be 7500");
+    function test_Split25_75_Allocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset.Split25_75);
+        assertEq(pctA, 2500, "Split25_75: pctA should be 2500");
+        assertEq(pctB, 7500, "Split25_75: pctB should be 7500");
         assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
     }
 
-    function test_BalancedAllocations() public pure {
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Balanced);
-        assertEq(pctA, 5000, "Balanced: pctA should be 5000");
-        assertEq(pctB, 5000, "Balanced: pctB should be 5000");
+    function test_Split50_50_Allocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset.Split50_50);
+        assertEq(pctA, 5000, "Split50_50: pctA should be 5000");
+        assertEq(pctB, 5000, "Split50_50: pctB should be 5000");
         assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
     }
 
-    function test_GrowthAllocations() public pure {
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Growth);
-        assertEq(pctA, 7500, "Growth: pctA should be 7500");
-        assertEq(pctB, 2500, "Growth: pctB should be 2500");
+    function test_Split75_25_Allocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset.Split75_25);
+        assertEq(pctA, 7500, "Split75_25: pctA should be 7500");
+        assertEq(pctB, 2500, "Split75_25: pctB should be 2500");
         assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
     }
 
-    function test_AggressiveAllocations() public pure {
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel.Aggressive);
-        assertEq(pctA, 9000, "Aggressive: pctA should be 9000");
-        assertEq(pctB, 1000, "Aggressive: pctB should be 1000");
+    function test_Split90_10_Allocations() public pure {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset.Split90_10);
+        assertEq(pctA, 9000, "Split90_10: pctA should be 9000");
+        assertEq(pctB, 1000, "Split90_10: pctB should be 1000");
         assertEq(pctA + pctB, 10000, "Allocations must sum to 10000");
     }
 
-    function test_AllRiskLevelsSumTo10000() public pure {
-        for (uint8 i = 0; i <= uint8(RiskLevel.Aggressive); i++) {
-            (uint16 pctA, uint16 pctB) = getTargetAllocations(RiskLevel(i));
-            assertEq(pctA + pctB, 10000, "All risk levels must sum to 10000");
+    function test_AllAllocationPresetsSumTo10000() public pure {
+        for (uint8 i = 0; i <= uint8(AllocationPreset.Split90_10); i++) {
+            (uint16 pctA, uint16 pctB) = getTargetAllocations(AllocationPreset(i));
+            assertEq(pctA + pctB, 10000, "All allocation presets must sum to 10000");
         }
     }
 
@@ -158,44 +159,44 @@ contract MeezanVaultTest is Test {
         assertEq(vault.feedDecimalsB(), 8, "USDC/USD feed should have 8 decimals");
     }
 
-    function test_RiskLevelSetCorrectly() public view {
-        assertEq(uint8(vault.riskLevel()), uint8(RiskLevel.Balanced), "Risk level should be Balanced");
+    function test_AllocationSetCorrectly() public view {
+        assertEq(uint8(vault.allocation()), uint8(AllocationPreset.Split50_50), "Allocation should be Split50_50");
     }
 
-    function test_AllocationsMatchRiskLevel() public view {
+    function test_AllocationsMatchPreset() public view {
         (uint16 pctA, uint16 pctB) = vault.targetAllocations();
-        (uint16 expectedA, uint16 expectedB) = getTargetAllocations(RiskLevel.Balanced);
-        assertEq(pctA, expectedA, "Target pct A should match Balanced preset");
-        assertEq(pctB, expectedB, "Target pct B should match Balanced preset");
+        (uint16 expectedA, uint16 expectedB) = getTargetAllocations(AllocationPreset.Split50_50);
+        assertEq(pctA, expectedA, "Target pct A should match Split50_50 preset");
+        assertEq(pctB, expectedB, "Target pct B should match Split50_50 preset");
     }
 
-    function test_VaultWithVeryConservative() public {
-        MeezanVault v = _createVault(RiskLevel.VeryConservative);
-        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.VeryConservative));
+    function test_VaultWithSplit10_90() public {
+        MeezanVault v = _createVault(AllocationPreset.Split10_90);
+        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split10_90));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 1000);
         assertEq(pctB, 9000);
     }
 
-    function test_VaultWithConservative() public {
-        MeezanVault v = _createVault(RiskLevel.Conservative);
-        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Conservative));
+    function test_VaultWithSplit25_75() public {
+        MeezanVault v = _createVault(AllocationPreset.Split25_75);
+        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split25_75));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 2500);
         assertEq(pctB, 7500);
     }
 
-    function test_VaultWithGrowth() public {
-        MeezanVault v = _createVault(RiskLevel.Growth);
-        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Growth));
+    function test_VaultWithSplit75_25() public {
+        MeezanVault v = _createVault(AllocationPreset.Split75_25);
+        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split75_25));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 7500);
         assertEq(pctB, 2500);
     }
 
-    function test_VaultWithAggressive() public {
-        MeezanVault v = _createVault(RiskLevel.Aggressive);
-        assertEq(uint8(v.riskLevel()), uint8(RiskLevel.Aggressive));
+    function test_VaultWithSplit90_10() public {
+        MeezanVault v = _createVault(AllocationPreset.Split90_10);
+        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split90_10));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 9000);
         assertEq(pctB, 1000);
@@ -210,7 +211,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -223,7 +224,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -236,7 +237,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -249,7 +250,7 @@ contract MeezanVaultTest is Test {
             address(0),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -262,7 +263,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(0),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -275,7 +276,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             2000, // Invalid fee tier
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -290,7 +291,7 @@ contract MeezanVaultTest is Test {
                 address(priceFeedB),
                 address(swapRouter),
                 validFees[i],
-                RiskLevel.Balanced
+                AllocationPreset.Split50_50
             );
             assertEq(v.poolFee(), validFees[i], "Pool fee should be set correctly");
         }
@@ -305,7 +306,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -319,7 +320,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -333,7 +334,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -347,7 +348,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -361,7 +362,7 @@ contract MeezanVaultTest is Test {
             address(badFeed),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Balanced
+            AllocationPreset.Split50_50
         );
     }
 
@@ -1096,15 +1097,15 @@ contract MeezanVaultTest is Test {
         assertEq(balB, 0);
     }
 
-    function testFuzz_VaultWithAnyRiskLevel(uint8 levelRaw) public {
-        // Bound to valid risk levels (0-4)
-        uint8 level = uint8(bound(levelRaw, 0, 4));
+    function testFuzz_VaultWithAnyAllocationPreset(uint8 presetRaw) public {
+        // Bound to valid allocation presets (0-4)
+        uint8 preset = uint8(bound(presetRaw, 0, 4));
 
-        MeezanVault v = _createVault(RiskLevel(level));
+        MeezanVault v = _createVault(AllocationPreset(preset));
 
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
-        assertEq(pctA + pctB, 10000, "All risk levels must sum to 10000");
-        assertEq(uint8(v.riskLevel()), level, "Risk level should be stored correctly");
+        assertEq(pctA + pctB, 10000, "All allocation presets must sum to 10000");
+        assertEq(uint8(v.allocation()), preset, "Allocation preset should be stored correctly");
     }
 
     function testFuzz_WithdrawCannotExceedBalance(uint256 depositAmt, uint256 withdrawAmt) public {
@@ -1269,7 +1270,7 @@ contract MeezanVaultTest is Test {
     }
 
     function test_SlippageBpsConstant() public view {
-        assertEq(vault.SLIPPAGE_BPS(), 100, "Slippage should be 1% (100 bps)");
+        assertEq(vault.DEFAULT_SLIPPAGE_BPS(), 100, "Default slippage should be 1% (100 bps)");
     }
 
     function test_MinSwapUsdConstant() public view {
@@ -1553,21 +1554,21 @@ contract MeezanVaultTest is Test {
         // which could happen with very high WBTC target allocation
 
         // Create a vault with 90% WBTC target
-        MeezanVault aggressiveVault = new MeezanVault(
+        MeezanVault split90_10Vault = new MeezanVault(
             address(tokenA),
             address(tokenB),
             address(priceFeedA),
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            RiskLevel.Aggressive // 90% WBTC
+            AllocationPreset.Split90_10 // 90% WBTC
         );
 
         // Fund router
         tokenA.mint(address(swapRouter), 100e8);
 
         // Approve vault
-        tokenB.approve(address(aggressiveVault), type(uint256).max);
+        tokenB.approve(address(split90_10Vault), type(uint256).max);
 
         // Deposit $100 USDC - needs to buy 90% = $90 worth of WBTC
         // Oracle cost = $90, with slippage = $90.90
@@ -1575,8 +1576,8 @@ contract MeezanVaultTest is Test {
         // Let's test with existing WBTC that creates a scenario where more USDC is needed
 
         // First add some WBTC to the vault
-        tokenA.approve(address(aggressiveVault), type(uint256).max);
-        aggressiveVault.depositTokenA(1e8); // $40,000 WBTC
+        tokenA.approve(address(split90_10Vault), type(uint256).max);
+        split90_10Vault.depositTokenA(1e8); // $40,000 WBTC
 
         // Now deposit $1000 USDC
         // Total: $41,000, Target 90% WBTC = $36,900, currently have $40,000
@@ -1587,5 +1588,253 @@ contract MeezanVaultTest is Test {
         // by the existing tests - if balance is sufficient, swap works
         // We've verified the revert path in rebalance, depositUSDC follows same pattern
         assertTrue(true, "Implicit test - depositUSDC revert follows same pattern as rebalance");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Slippage Configuration Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_SlippageDefaultValue() public view {
+        assertEq(vault.slippageBps(), 100, "Default slippage should be 100 bps (1%)");
+        assertEq(vault.DEFAULT_SLIPPAGE_BPS(), 100, "DEFAULT_SLIPPAGE_BPS constant should be 100");
+    }
+
+    function test_SlippageBoundsConstants() public view {
+        assertEq(vault.MIN_SLIPPAGE_BPS(), 10, "MIN_SLIPPAGE_BPS should be 10 (0.1%)");
+        assertEq(vault.MAX_SLIPPAGE_BPS(), 500, "MAX_SLIPPAGE_BPS should be 500 (5%)");
+    }
+
+    function test_SetSlippageBps() public {
+        uint16 newSlippage = 200; // 2%
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.SlippageUpdated(100, newSlippage);
+
+        vault.setSlippageBps(newSlippage);
+
+        assertEq(vault.slippageBps(), newSlippage, "Slippage should be updated");
+    }
+
+    function test_SetSlippageBpsMinBound() public {
+        vault.setSlippageBps(10); // MIN_SLIPPAGE_BPS
+        assertEq(vault.slippageBps(), 10, "Should allow minimum slippage");
+    }
+
+    function test_SetSlippageBpsMaxBound() public {
+        vault.setSlippageBps(500); // MAX_SLIPPAGE_BPS
+        assertEq(vault.slippageBps(), 500, "Should allow maximum slippage");
+    }
+
+    function test_RevertSetSlippageBpsBelowMin() public {
+        vm.expectRevert(MeezanVault.InvalidSlippageBps.selector);
+        vault.setSlippageBps(9); // Below MIN_SLIPPAGE_BPS
+    }
+
+    function test_RevertSetSlippageBpsAboveMax() public {
+        vm.expectRevert(MeezanVault.InvalidSlippageBps.selector);
+        vault.setSlippageBps(501); // Above MAX_SLIPPAGE_BPS
+    }
+
+    function test_RevertSetSlippageBpsNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.setSlippageBps(200);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Pausable Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_PauseUnpause() public {
+        assertFalse(vault.paused(), "Should not be paused initially");
+
+        vault.pause();
+        assertTrue(vault.paused(), "Should be paused");
+
+        vault.unpause();
+        assertFalse(vault.paused(), "Should be unpaused");
+    }
+
+    function test_RevertPauseNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.pause();
+    }
+
+    function test_RevertUnpauseNotOwner() public {
+        vault.pause();
+
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.unpause();
+    }
+
+    function test_DepositTokenARevertsWhenPaused() public {
+        vault.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vault.depositTokenA(1e8);
+    }
+
+    function test_DepositTokenBRevertsWhenPaused() public {
+        vault.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vault.depositTokenB(1000e6);
+    }
+
+    function test_DepositUSDCRevertsWhenPaused() public {
+        vault.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vault.depositUSDC(1000e6);
+    }
+
+    function test_WithdrawWorksWhenPaused() public {
+        // Deposit first
+        vault.depositTokenA(1e8);
+        vault.depositTokenB(40_000e6);
+
+        vault.pause();
+
+        // Withdrawals should still work when paused
+        vault.withdrawTokenA(0.5e8);
+        vault.withdrawTokenB(20_000e6);
+        vault.withdrawAll();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Two-Step Ownership Transfer Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_TransferOwnershipStartsTransfer() public {
+        address newOwner = address(0x1234);
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.OwnershipTransferStarted(owner, newOwner);
+
+        vault.transferOwnership(newOwner);
+
+        assertEq(vault.pendingOwner(), newOwner, "Pending owner should be set");
+        assertEq(vault.owner(), owner, "Owner should not change yet");
+    }
+
+    function test_AcceptOwnershipCompletesTransfer() public {
+        address newOwner = address(0x1234);
+
+        vault.transferOwnership(newOwner);
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.OwnershipTransferred(owner, newOwner);
+
+        vm.prank(newOwner);
+        vault.acceptOwnership();
+
+        assertEq(vault.owner(), newOwner, "Owner should be updated");
+        assertEq(vault.pendingOwner(), address(0), "Pending owner should be cleared");
+    }
+
+    function test_NewOwnerCanCallOwnerFunctions() public {
+        address newOwner = address(0x1234);
+
+        vault.transferOwnership(newOwner);
+        vm.prank(newOwner);
+        vault.acceptOwnership();
+
+        // New owner should be able to call owner functions
+        vm.prank(newOwner);
+        vault.setSlippageBps(200);
+
+        assertEq(vault.slippageBps(), 200, "New owner should be able to set slippage");
+    }
+
+    function test_RevertTransferOwnershipToZeroAddress() public {
+        vm.expectRevert(MeezanVault.ZeroAddress.selector);
+        vault.transferOwnership(address(0));
+    }
+
+    function test_RevertTransferOwnershipNotOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.transferOwnership(address(0x1234));
+    }
+
+    function test_RevertAcceptOwnershipNotPendingOwner() public {
+        address newOwner = address(0x1234);
+        vault.transferOwnership(newOwner);
+
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.NotPendingOwner.selector);
+        vault.acceptOwnership();
+    }
+
+    function test_RevertAcceptOwnershipNoPendingOwner() public {
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.NotPendingOwner.selector);
+        vault.acceptOwnership();
+    }
+
+    function test_OwnerCanCancelTransfer() public {
+        address newOwner = address(0x1234);
+        address anotherOwner = address(0x5678);
+
+        vault.transferOwnership(newOwner);
+        assertEq(vault.pendingOwner(), newOwner);
+
+        // Owner can overwrite pending owner
+        vault.transferOwnership(anotherOwner);
+        assertEq(vault.pendingOwner(), anotherOwner, "Pending owner should be overwritten");
+
+        // Old pending owner can no longer accept
+        vm.prank(newOwner);
+        vm.expectRevert(MeezanVault.NotPendingOwner.selector);
+        vault.acceptOwnership();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Rescue Token Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_RescueToken() public {
+        // Create a random token and send it to the vault
+        MockERC20 randomToken = new MockERC20("Random Token", "RND", 18);
+        randomToken.mint(address(vault), 1000e18);
+
+        uint256 ownerBalanceBefore = randomToken.balanceOf(owner);
+
+        vm.expectEmit(true, true, true, true);
+        emit MeezanVault.TokenRescued(address(randomToken), 1000e18);
+
+        vault.rescueToken(address(randomToken));
+
+        assertEq(randomToken.balanceOf(address(vault)), 0, "Vault should have no random tokens");
+        assertEq(randomToken.balanceOf(owner), ownerBalanceBefore + 1000e18, "Owner should receive tokens");
+    }
+
+    function test_RevertRescueTokenA() public {
+        vm.expectRevert(MeezanVault.CannotRescueVaultToken.selector);
+        vault.rescueToken(address(tokenA));
+    }
+
+    function test_RevertRescueTokenB() public {
+        vm.expectRevert(MeezanVault.CannotRescueVaultToken.selector);
+        vault.rescueToken(address(tokenB));
+    }
+
+    function test_RevertRescueTokenZeroBalance() public {
+        MockERC20 randomToken = new MockERC20("Random Token", "RND", 18);
+        // Don't mint any tokens
+
+        vm.expectRevert(MeezanVault.ZeroAmount.selector);
+        vault.rescueToken(address(randomToken));
+    }
+
+    function test_RevertRescueTokenNotOwner() public {
+        MockERC20 randomToken = new MockERC20("Random Token", "RND", 18);
+        randomToken.mint(address(vault), 1000e18);
+
+        vm.prank(attacker);
+        vm.expectRevert(MeezanVault.OnlyOwner.selector);
+        vault.rescueToken(address(randomToken));
     }
 }

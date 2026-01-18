@@ -4,4 +4,14 @@ out/
 .next/
 coverage/
 .env
+.env.local
 .DS_Store
+
+# Foundry
+cache/
+broadcast/
+*.log
+
+# Local
+.claude/
+nul
