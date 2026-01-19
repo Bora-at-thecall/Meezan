@@ -1,57 +1,83 @@
 # Next Action Required
 
-**Status:** COMPLETE - v1 Deployed
+**Status:** ACTION REQUIRED - Micro Real-Funds Test
 
 **Last Updated:** 2026-01-19
 
 ---
 
-## Deployment Complete
+## Action: Complete Micro Real-Funds Test
 
-MeezanFactory has been deployed to Base mainnet.
+Before declaring launch-ready, verify the system with a small real deposit.
+
+### Prerequisites
+
+1. Wallet connected to Base mainnet
+2. Small amount of USDC (e.g., $10-50)
+3. Small amount of ETH for gas (~$1)
+
+### Test Steps
+
+1. **Deploy Web App** (if not already running)
+   ```bash
+   cd apps/web
+   npm run dev
+   ```
+
+2. **Create Vault**
+   - Connect wallet
+   - Select 50/50 allocation
+   - Create vault
+   - Record vault address: _______________
+
+3. **Deposit**
+   - Approve USDC spending
+   - Deposit 10 USDC
+   - Verify balances show in UI
+
+4. **Verify on Basescan**
+   - Check vault contract holds cbBTC + USDC
+   - Confirm allocation roughly matches 50/50
+
+5. **Withdraw**
+   - Click withdraw
+   - Confirm both tokens returned to wallet
+
+6. **Record Results**
+
+   | Step | Pass/Fail | Tx Hash |
+   |------|-----------|---------|
+   | Create Vault | | |
+   | Deposit | | |
+   | Withdraw | | |
+
+---
+
+## After Test Passes
+
+1. Update ops/LAUNCH_CHECKLIST.md with test results
+2. Sign off on launch readiness
+3. Push changes: `git push origin master`
+
+---
+
+## Deployment Summary
 
 | Item | Value |
 |------|-------|
-| Contract | MeezanFactory |
-| Address | `0x9FfD7a7dd2C730f1E85643868B645778feDF4f8b` |
-| Network | Base Mainnet (Chain ID 8453) |
-| Block | 40,992,707 |
-| Verification | Sourcify (exact match) |
-
----
-
-## Configuration
-
-| Component | Address |
-|-----------|---------|
 | MeezanFactory | `0x9FfD7a7dd2C730f1E85643868B645778feDF4f8b` |
-| Token A (cbBTC) | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` |
-| Token B (USDC) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
-| BTC/USD Feed | `0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D` |
-| USDC/USD Feed | `0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` |
-| Swap Router | `0x2626664c2603336E57B271c5C0b26F421741e481` |
-| Pool Fee | 500 (0.05%) |
+| Network | Base Mainnet (8453) |
+| Status Page | `/status` |
+| API Endpoint | `/api/status` |
 
 ---
 
-## Post-Deployment Checklist
+## Checklist Progress
 
 - [x] Factory deployed to Base mainnet
 - [x] Contract verified on Sourcify
-- [x] Web app updated with factory address
-- [x] SECURITY.md created
-- [x] DISCLAIMER.md created
-- [x] ops/STATUS.md updated
-- [ ] All changes committed
-- [ ] v1 declared ready
-
----
-
-## No Further Action Required
-
-The system is operational. Users can now:
-
-1. Connect wallet to the web app
-2. Create a vault with their chosen allocation
-3. Deposit USDC
-4. Withdraw at any time
+- [x] Web app configured with factory address
+- [x] Status monitoring implemented
+- [x] Launch checklist created
+- [ ] **Micro real-funds test** ← NEXT
+- [ ] Launch sign-off

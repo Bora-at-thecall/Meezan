@@ -5,6 +5,8 @@ export const CONTRACTS = {
   factory: '0x9FfD7a7dd2C730f1E85643868B645778feDF4f8b' as Address,
   usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,
   wbtc: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf' as Address, // cbBTC on Base
+  btcUsdFeed: '0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D' as Address,
+  usdcUsdFeed: '0x7e860098F58bBFC8648a4311b374B1D669a2bc6B' as Address,
 }
 
 // Allocation presets matching the contract enum
@@ -192,6 +194,30 @@ export const ERC20_ABI = [
       { name: 'amount', type: 'uint256' },
     ],
     outputs: [{ type: 'bool' }],
+  },
+  {
+    name: 'decimals',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'uint8' }],
+  },
+] as const
+
+// Chainlink Price Feed ABI (minimal for status checks)
+export const PRICE_FEED_ABI = [
+  {
+    name: 'latestRoundData',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      { name: 'roundId', type: 'uint80' },
+      { name: 'answer', type: 'int256' },
+      { name: 'startedAt', type: 'uint256' },
+      { name: 'updatedAt', type: 'uint256' },
+      { name: 'answeredInRound', type: 'uint80' },
+    ],
   },
   {
     name: 'decimals',
