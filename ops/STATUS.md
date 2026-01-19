@@ -116,6 +116,103 @@ Total: 158 tests passed
 
 ---
 
+## UX State Diagram
+
+### Onboarding Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Welcome   │ ──▶ │    Learn    │ ──▶ │   Connect   │
+│  (Explain)  │     │ (Allocations│     │   Wallet    │
+└─────────────┘     └─────────────┘     └─────────────┘
+                                               │
+                                               ▼
+                                        ┌─────────────┐
+                                        │  Connected  │
+                                        │   (Home)    │
+                                        └─────────────┘
+```
+
+### Deposit Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Choose    │ ──▶ │   Enter     │ ──▶ │   Review    │
+│ Allocation  │     │   Amount    │     │   Details   │
+└─────────────┘     └─────────────┘     └─────────────┘
+      │                   │                    │
+      │ Progress: ████░░░░│ Progress: ████████░│ Progress: ████████████
+      │                   │                    │
+      ▼                   ▼                    ▼
+                                        ┌─────────────┐
+                                        │  Processing │
+                                        └─────────────┘
+                                               │
+                    ┌──────────────────────────┼──────────────────────────┐
+                    ▼                          ▼                          ▼
+            ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
+            │   Create    │ ────────▶  │   Approve   │ ────────▶  │   Deposit   │
+            │    Vault    │            │    USDC     │            │    Funds    │
+            └─────────────┘            └─────────────┘            └─────────────┘
+                    │                          │                          │
+                    ▼                          ▼                          ▼
+            ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
+            │  Awaiting   │            │  Awaiting   │            │  Awaiting   │
+            │  Confirm    │            │  Confirm    │            │  Confirm    │
+            └─────────────┘            └─────────────┘            └─────────────┘
+                                                                         │
+                                                                         ▼
+                                                                  ┌─────────────┐
+                                                                  │  Complete   │ ──▶ Portfolio
+                                                                  └─────────────┘
+```
+
+### Error States
+
+All transaction states can transition to error:
+
+```
+┌─────────────┐
+│  Any State  │
+└─────────────┘
+       │
+       │ Error occurs
+       ▼
+┌─────────────┐
+│   Error     │  Shows:
+│   Display   │  - Human-readable title
+│             │  - Explanation
+│             │  - Suggested action
+└─────────────┘
+       │
+       │ User acknowledges
+       ▼
+┌─────────────┐
+│   Review    │  (Retry from here)
+└─────────────┘
+```
+
+### Portfolio Actions
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Portfolio                         │
+│  ┌─────────────────────────────────────────────┐    │
+│  │              Total Value                     │    │
+│  │              BTC / USDC split               │    │
+│  └─────────────────────────────────────────────┘    │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐   │
+│  │          [WITHDRAW ALL] ← Primary            │   │
+│  └──────────────────────────────────────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │ Deposit More │  │   Details    │ ← Secondary    │
+│  └──────────────┘  └──────────────┘                 │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
 ## v1 Ready
 
 Meezan v1 is deployed and operational on Base mainnet.

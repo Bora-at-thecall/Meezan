@@ -8,6 +8,9 @@ import { Button } from '@/components/Button'
 import { Card } from '@/components/Card'
 import { useVaultState, useRebalance } from '@/lib/hooks'
 import { getUserVaults } from '@/lib/store'
+import { parseError } from '@/lib/errors'
+
+type RebalanceState = 'idle' | 'confirming' | 'pending' | 'success' | 'error'
 
 function DetailsContent() {
   const router = useRouter()
@@ -15,9 +18,11 @@ function DetailsContent() {
   const { address, isConnected } = useAccount()
   const [showTechnical, setShowTechnical] = useState(false)
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
+  const [rebalanceState, setRebalanceState] = useState<RebalanceState>('idle')
+  const [rebalanceError, setRebalanceError] = useState<{ title: string; message: string } | null>(null)
 
   const { holdings, values, allocations, drift, allocation } = useVaultState(vaultAddress)
-  const { rebalance, isPending: isRebalancing } = useRebalance(vaultAddress)
+  const { rebalance, isPending, isConfirming, isSuccess, error: rawRebalanceError } = useRebalance(vaultAddress)
 
   const DRIFT_THRESHOLD = 5
 
@@ -42,11 +47,45 @@ function DetailsContent() {
     }
   }, [isConnected, router])
 
+  // Track rebalance state
+  useEffect(() => {
+    if (isPending) setRebalanceState('confirming')
+    else if (isConfirming) setRebalanceState('pending')
+    else if (isSuccess) setRebalanceState('success')
+  }, [isPending, isConfirming, isSuccess])
+
+  // Handle rebalance errors
+  useEffect(() => {
+    if (rawRebalanceError) {
+      const parsed = parseError(rawRebalanceError)
+      setRebalanceError({ title: parsed.title, message: parsed.message })
+      setRebalanceState('error')
+    }
+  }, [rawRebalanceError])
+
+  // Reset after success
+  useEffect(() => {
+    if (isSuccess) {
+      setTimeout(() => {
+        setRebalanceState('idle')
+      }, 3000)
+    }
+  }, [isSuccess])
+
   if (!isConnected) return null
 
   const handleRebalance = () => {
+    setRebalanceError(null)
+    setRebalanceState('confirming')
     rebalance()
   }
+
+  const dismissError = () => {
+    setRebalanceError(null)
+    setRebalanceState('idle')
+  }
+
+  const isRebalancing = rebalanceState === 'confirming' || rebalanceState === 'pending'
 
   const btcBalance = holdings.btc ? formatUnits(holdings.btc, 8) : '0'
   const usdcBalance = holdings.usdc ? formatUnits(holdings.usdc, 6) : '0'
@@ -146,13 +185,38 @@ function DetailsContent() {
           </div>
         </Card>
 
+        {/* Rebalance error display */}
+        {rebalanceError && (
+          <Card variant="default" className="bg-red-500/10 border border-red-500/20 mb-4">
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-sm text-red-400 font-medium">{rebalanceError.title}</p>
+                <p className="text-xs text-red-400/70 mt-1">{rebalanceError.message}</p>
+              </div>
+              <button onClick={dismissError} className="text-red-400 hover:text-red-300">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {/* Rebalance success display */}
+        {rebalanceState === 'success' && (
+          <Card variant="default" className="bg-green-500/10 border border-green-500/20 mb-4">
+            <p className="text-sm text-green-400 font-medium text-center">Rebalance complete</p>
+          </Card>
+        )}
+
         <Button
           size="large"
           variant={canRebalance ? 'primary' : 'secondary'}
           onClick={handleRebalance}
           disabled={!canRebalance || isRebalancing}
         >
-          {isRebalancing ? 'Processing...' : 'Rebalance'}
+          {rebalanceState === 'confirming' ? 'Confirm in wallet...' :
+           rebalanceState === 'pending' ? 'Processing...' : 'Rebalance'}
         </Button>
         {!canRebalance && (
           <p className="text-xs text-[var(--muted)] text-center mt-3">
