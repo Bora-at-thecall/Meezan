@@ -133,7 +133,7 @@ Total: 158 tests passed
                                         └─────────────┘
 ```
 
-### Deposit Flow
+### Deposit Flow (Chain-Verified)
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -145,27 +145,85 @@ Total: 158 tests passed
       │                   │                    │
       ▼                   ▼                    ▼
                                         ┌─────────────┐
-                                        │  Processing │
+                                        │  Confirm    │
                                         └─────────────┘
                                                │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    ▼                          ▼                          ▼
-            ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
-            │   Create    │ ────────▶  │   Approve   │ ────────▶  │   Deposit   │
-            │    Vault    │            │    USDC     │            │    Funds    │
-            └─────────────┘            └─────────────┘            └─────────────┘
-                    │                          │                          │
-                    ▼                          ▼                          ▼
-            ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
-            │  Awaiting   │            │  Awaiting   │            │  Awaiting   │
-            │  Confirm    │            │  Confirm    │            │  Confirm    │
-            └─────────────┘            └─────────────┘            └─────────────┘
-                                                                         │
-                                                                         ▼
-                                                                  ┌─────────────┐
-                                                                  │  Complete   │ ──▶ Portfolio
-                                                                  └─────────────┘
+                                               ▼
+                                  ┌───────────────────────┐
+                                  │   Processing Screen   │
+                                  │  (Live Step Status)   │
+                                  └───────────────────────┘
 ```
+
+### Transaction State Machine (Chain-Verified)
+
+Each transaction step follows this strict sub-state sequence:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STEP: CREATE_VAULT | APPROVE_USDC | DEPOSIT                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────┐│
+│  │  awaiting_   │───▶│ tx_submitted │───▶│ confirming_  │───▶│confirm-││
+│  │   wallet     │    │   (hash)     │    │   onchain    │    │  ed    ││
+│  └──────────────┘    └──────────────┘    └──────────────┘    └────────┘│
+│        │                    │                   │                       │
+│        │ User rejects       │ Tx fails          │ Verification fails   │
+│        ▼                    ▼                   ▼                       │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                          ERROR                                   │   │
+│  │  - Human-readable title                                          │   │
+│  │  - Explanation message                                           │   │
+│  │  - Suggested action                                              │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Chain Verification Sequence
+
+```
+STEP 1: CREATE VAULT (if no existing vault)
+  ├─ Check on-chain: factory.getVault(owner, allocation)
+  ├─ If exists → skip to STEP 2
+  ├─ If not exists:
+  │     ├─ awaiting_wallet: "Confirm in your wallet"
+  │     ├─ tx_submitted: writeContractAsync(factory.createVault)
+  │     ├─ confirming_onchain: waitForTransactionReceipt
+  │     ├─ VERIFY: Extract vault address from VaultDeployed event logs
+  │     ├─ VERIFY: factory.getVault(owner, allocation) matches extracted
+  │     └─ confirmed: vaultVerified = true
+  │
+  ▼
+STEP 2: APPROVE USDC (if insufficient allowance)
+  ├─ Check on-chain: usdc.allowance(owner, vault) >= depositAmount
+  ├─ If sufficient → skip to STEP 3
+  ├─ If insufficient:
+  │     ├─ awaiting_wallet: "Confirm in your wallet"
+  │     ├─ tx_submitted: writeContractAsync(usdc.approve)
+  │     ├─ confirming_onchain: waitForTransactionReceipt
+  │     ├─ VERIFY: usdc.allowance(owner, vault) >= depositAmount
+  │     └─ confirmed: allowanceVerified = true
+  │
+  ▼
+STEP 3: DEPOSIT
+  ├─ awaiting_wallet: "Confirm in your wallet"
+  ├─ tx_submitted: writeContractAsync(vault.depositUSDC)
+  ├─ confirming_onchain: waitForTransactionReceipt
+  ├─ VERIFY: vault.holdings() shows balances > 0
+  └─ confirmed: depositVerified = true
+  │
+  ▼
+SUCCESS → Store vault in localStorage → Redirect to /portfolio
+```
+
+**Critical Rules:**
+- NEVER advance UI without chain verification
+- NEVER assume transaction success without receipt
+- NEVER skip allowance check even if approval was just submitted
+- Extract vault address from VaultDeployed event logs, not localStorage
+- All verification uses on-chain reads, not local state
 
 ### Error States
 

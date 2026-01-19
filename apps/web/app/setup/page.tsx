@@ -1,102 +1,59 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAccount } from 'wagmi'
+import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { Button } from '@/components/Button'
 import { Card } from '@/components/Card'
-import { ALLOCATION_PRESETS, type AllocationPresetType, CONTRACTS } from '@/lib/contracts'
-import { useCreateVault, useApproveUsdc, useDeposit, useUsdcBalance, useUsdcAllowance } from '@/lib/hooks'
+import { ALLOCATION_PRESETS, type AllocationPresetType, CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI } from '@/lib/contracts'
+import { useUsdcBalance } from '@/lib/hooks'
 import { storeVault, getStoredVault } from '@/lib/store'
-import { parseError } from '@/lib/errors'
-import { parseUnits, type Address } from 'viem'
+import {
+  type OrchestratorState,
+  type TxStep,
+  INITIAL_STATE,
+  getStateMessage,
+  extractVaultAddressFromReceipt,
+  verifyVaultExists,
+  verifyAllowance,
+  waitForReceipt,
+  verifyVaultHasHoldings,
+  parseTransactionError,
+} from '@/lib/tx-orchestrator'
+import { parseUnits, type Address, type Hash } from 'viem'
 
-// Clear step definitions
-type Step = 'allocation' | 'amount' | 'review' | 'processing'
-
-// Processing sub-states for clear feedback
-type ProcessingPhase =
-  | 'creating_vault'
-  | 'awaiting_vault_confirm'
-  | 'approving_usdc'
-  | 'awaiting_approve_confirm'
-  | 'depositing'
-  | 'awaiting_deposit_confirm'
-  | 'complete'
-
-const PHASE_MESSAGES: Record<ProcessingPhase, { title: string; subtitle: string }> = {
-  creating_vault: {
-    title: 'Creating your vault',
-    subtitle: 'Confirm in your wallet',
-  },
-  awaiting_vault_confirm: {
-    title: 'Creating your vault',
-    subtitle: 'Waiting for confirmation...',
-  },
-  approving_usdc: {
-    title: 'Approving USDC',
-    subtitle: 'Confirm in your wallet',
-  },
-  awaiting_approve_confirm: {
-    title: 'Approving USDC',
-    subtitle: 'Waiting for confirmation...',
-  },
-  depositing: {
-    title: 'Depositing funds',
-    subtitle: 'Confirm in your wallet',
-  },
-  awaiting_deposit_confirm: {
-    title: 'Depositing funds',
-    subtitle: 'Waiting for confirmation...',
-  },
-  complete: {
-    title: 'Complete',
-    subtitle: 'Redirecting...',
-  },
-}
+// UI step before processing
+type SetupStep = 'allocation' | 'amount' | 'review' | 'processing'
 
 export default function SetupPage() {
   const router = useRouter()
   const { address, isConnected } = useAccount()
 
   // UI state
-  const [step, setStep] = useState<Step>('allocation')
+  const [setupStep, setSetupStep] = useState<SetupStep>('allocation')
   const [selectedAllocation, setSelectedAllocation] = useState<AllocationPresetType | null>(null)
   const [amount, setAmount] = useState('')
-  const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
-  const [processingPhase, setProcessingPhase] = useState<ProcessingPhase>('creating_vault')
-  const [error, setError] = useState<{ title: string; message: string; action?: string } | null>(null)
+  const [inputError, setInputError] = useState<string | null>(null)
+
+  // Transaction orchestrator state
+  const [txState, setTxState] = useState<OrchestratorState>(INITIAL_STATE)
+
+  // Track if we're currently orchestrating to prevent double-execution
+  const orchestratingRef = useRef(false)
+
+  // Amount in wei for contract calls
+  const depositAmountWei = amount ? parseUnits(amount, 6) : 0n
 
   // Contract hooks
   const { formatted: usdcBalance } = useUsdcBalance()
-  const { allowance, refetch: refetchAllowance } = useUsdcAllowance(vaultAddress)
 
-  const {
-    createVault,
-    isPending: isCreatePending,
-    isConfirming: isCreateConfirming,
-    isSuccess: isCreateSuccess,
-    error: createError,
-    hash: createHash,
-  } = useCreateVault()
-
-  const {
-    approve,
-    isPending: isApprovePending,
-    isConfirming: isApproveConfirming,
-    isSuccess: isApproveSuccess,
-    error: approveError,
-  } = useApproveUsdc()
-
-  const {
-    deposit,
-    isPending: isDepositPending,
-    isConfirming: isDepositConfirming,
-    isSuccess: isDepositSuccess,
-    error: depositError,
-  } = useDeposit(vaultAddress)
+  // Write contract hooks - we'll use these imperatively
+  const { writeContractAsync } = useWriteContract()
 
   const factoryConfigured = CONTRACTS.factory !== '0x0000000000000000000000000000000000000000'
+
+  // Check for existing vault on allocation select
+  const [existingVaultAddress, setExistingVaultAddress] = useState<Address | null>(null)
 
   // Redirect if not connected
   useEffect(() => {
@@ -105,159 +62,421 @@ export default function SetupPage() {
     }
   }, [isConnected, router])
 
-  // Track processing phases
-  useEffect(() => {
-    if (isCreatePending) setProcessingPhase('creating_vault')
-    else if (isCreateConfirming) setProcessingPhase('awaiting_vault_confirm')
-    else if (isApprovePending) setProcessingPhase('approving_usdc')
-    else if (isApproveConfirming) setProcessingPhase('awaiting_approve_confirm')
-    else if (isDepositPending) setProcessingPhase('depositing')
-    else if (isDepositConfirming) setProcessingPhase('awaiting_deposit_confirm')
-  }, [isCreatePending, isCreateConfirming, isApprovePending, isApproveConfirming, isDepositPending, isDepositConfirming])
+  // ============================================
+  // CHAIN-VERIFIED TRANSACTION ORCHESTRATION
+  // ============================================
 
-  // Handle vault creation success - get vault address from logs
-  useEffect(() => {
-    if (isCreateSuccess && createHash && selectedAllocation && address && !vaultAddress) {
-      // Vault was created, now we need to get the address
-      // For now, use the stored vault lookup or factory query
-      const checkVault = async () => {
-        // Small delay to let the chain update
-        await new Promise(r => setTimeout(r, 2000))
+  const runOrchestration = useCallback(async () => {
+    if (!address || !selectedAllocation || orchestratingRef.current) return
+    orchestratingRef.current = true
 
-        // Try to get from storage or re-fetch
-        const stored = getStoredVault(address, selectedAllocation.id)
-        if (stored) {
-          setVaultAddress(stored)
+    const allocation = selectedAllocation.id
+    let currentVaultAddress = existingVaultAddress
+
+    try {
+      // ============================================
+      // STEP 1: CREATE VAULT (if needed)
+      // ============================================
+      if (!currentVaultAddress) {
+        // Check if vault already exists on-chain (in case of page refresh)
+        console.log('Checking if vault already exists...')
+        const existingVault = await verifyVaultExists(address, allocation)
+        if (existingVault) {
+          console.log('Found existing vault on-chain:', existingVault)
+          currentVaultAddress = existingVault
+          setTxState(prev => ({
+            ...prev,
+            vaultAddress: existingVault,
+            vaultVerified: true,
+          }))
+        } else {
+          // Need to create vault
+          setTxState(prev => ({
+            ...prev,
+            step: 'create_vault',
+            subState: 'awaiting_wallet',
+            error: null,
+          }))
+
+          console.log('Creating vault...')
+          let createHash: Hash
+
+          try {
+            createHash = await writeContractAsync({
+              address: CONTRACTS.factory,
+              abi: FACTORY_ABI,
+              functionName: 'createVault',
+              args: [allocation],
+            })
+          } catch (error) {
+            console.error('User rejected or error creating vault:', error)
+            const parsed = parseTransactionError(error)
+            setTxState(prev => ({
+              ...prev,
+              subState: 'error',
+              error: parsed,
+            }))
+            orchestratingRef.current = false
+            return
+          }
+
+          setTxState(prev => ({
+            ...prev,
+            subState: 'tx_submitted',
+            txHash: createHash,
+          }))
+
+          console.log('Waiting for vault creation receipt...')
+          setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
+
+          // Extract vault address from event logs
+          const extractedVault = await extractVaultAddressFromReceipt(createHash)
+          if (!extractedVault) {
+            setTxState(prev => ({
+              ...prev,
+              subState: 'error',
+              error: {
+                title: 'Vault Creation Failed',
+                message: 'Could not verify vault was created.',
+                action: 'Please try again.',
+              },
+            }))
+            orchestratingRef.current = false
+            return
+          }
+
+          // Verify vault exists on-chain
+          console.log('Verifying vault on-chain...')
+          const verifiedVault = await verifyVaultExists(address, allocation)
+          if (!verifiedVault || verifiedVault !== extractedVault) {
+            setTxState(prev => ({
+              ...prev,
+              subState: 'error',
+              error: {
+                title: 'Verification Failed',
+                message: 'Could not verify vault exists on chain.',
+                action: 'Please try again.',
+              },
+            }))
+            orchestratingRef.current = false
+            return
+          }
+
+          currentVaultAddress = verifiedVault
+          setTxState(prev => ({
+            ...prev,
+            vaultAddress: verifiedVault,
+            vaultVerified: true,
+            subState: 'confirmed',
+          }))
+
+          console.log('Vault created and verified:', verifiedVault)
+          // Small delay before next step
+          await new Promise(r => setTimeout(r, 500))
         }
       }
-      checkVault()
-    }
-  }, [isCreateSuccess, createHash, selectedAllocation, address, vaultAddress])
 
-  // Handle approval success - proceed to deposit
-  useEffect(() => {
-    if (isApproveSuccess && vaultAddress) {
-      refetchAllowance()
-      // Small delay then deposit
-      setTimeout(() => {
-        deposit(amount)
-      }, 1000)
-    }
-  }, [isApproveSuccess, vaultAddress, amount, deposit, refetchAllowance])
+      // At this point we must have a vault address
+      if (!currentVaultAddress) {
+        setTxState(prev => ({
+          ...prev,
+          subState: 'error',
+          error: {
+            title: 'No Vault',
+            message: 'Vault address not available.',
+            action: 'Please try again.',
+          },
+        }))
+        orchestratingRef.current = false
+        return
+      }
 
-  // Handle deposit success - save and redirect
-  useEffect(() => {
-    if (isDepositSuccess && vaultAddress && selectedAllocation && address) {
-      setProcessingPhase('complete')
-      storeVault(address, selectedAllocation.id, vaultAddress)
+      // ============================================
+      // STEP 2: APPROVE USDC (if needed)
+      // ============================================
+
+      // Check current allowance on-chain
+      console.log('Checking USDC allowance...')
+      const hasAllowance = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
+
+      if (!hasAllowance) {
+        setTxState(prev => ({
+          ...prev,
+          step: 'approve_usdc',
+          subState: 'awaiting_wallet',
+          error: null,
+        }))
+
+        console.log('Approving USDC...')
+        let approveHash: Hash
+
+        try {
+          approveHash = await writeContractAsync({
+            address: CONTRACTS.usdc,
+            abi: ERC20_ABI,
+            functionName: 'approve',
+            args: [currentVaultAddress, depositAmountWei],
+          })
+        } catch (error) {
+          console.error('User rejected or error approving:', error)
+          const parsed = parseTransactionError(error)
+          setTxState(prev => ({
+            ...prev,
+            subState: 'error',
+            error: parsed,
+          }))
+          orchestratingRef.current = false
+          return
+        }
+
+        setTxState(prev => ({
+          ...prev,
+          subState: 'tx_submitted',
+          txHash: approveHash,
+        }))
+
+        console.log('Waiting for approval receipt...')
+        setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
+
+        const approveSuccess = await waitForReceipt(approveHash)
+        if (!approveSuccess) {
+          setTxState(prev => ({
+            ...prev,
+            subState: 'error',
+            error: {
+              title: 'Approval Failed',
+              message: 'USDC approval transaction failed.',
+              action: 'Please try again.',
+            },
+          }))
+          orchestratingRef.current = false
+          return
+        }
+
+        // Verify allowance on-chain
+        console.log('Verifying allowance on-chain...')
+        const allowanceVerified = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
+        if (!allowanceVerified) {
+          setTxState(prev => ({
+            ...prev,
+            subState: 'error',
+            error: {
+              title: 'Verification Failed',
+              message: 'Could not verify USDC allowance.',
+              action: 'Please try again.',
+            },
+          }))
+          orchestratingRef.current = false
+          return
+        }
+
+        setTxState(prev => ({
+          ...prev,
+          allowanceVerified: true,
+          subState: 'confirmed',
+        }))
+
+        console.log('Allowance verified')
+        await new Promise(r => setTimeout(r, 500))
+      } else {
+        console.log('Sufficient allowance already exists')
+        setTxState(prev => ({
+          ...prev,
+          allowanceVerified: true,
+        }))
+      }
+
+      // ============================================
+      // STEP 3: DEPOSIT
+      // ============================================
+
+      setTxState(prev => ({
+        ...prev,
+        step: 'deposit',
+        subState: 'awaiting_wallet',
+        error: null,
+      }))
+
+      console.log('Depositing USDC...')
+      let depositHash: Hash
+
+      try {
+        depositHash = await writeContractAsync({
+          address: currentVaultAddress,
+          abi: VAULT_ABI,
+          functionName: 'depositUSDC',
+          args: [depositAmountWei],
+        })
+      } catch (error) {
+        console.error('User rejected or error depositing:', error)
+        const parsed = parseTransactionError(error)
+        setTxState(prev => ({
+          ...prev,
+          subState: 'error',
+          error: parsed,
+        }))
+        orchestratingRef.current = false
+        return
+      }
+
+      setTxState(prev => ({
+        ...prev,
+        subState: 'tx_submitted',
+        txHash: depositHash,
+      }))
+
+      console.log('Waiting for deposit receipt...')
+      setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
+
+      const depositSuccess = await waitForReceipt(depositHash)
+      if (!depositSuccess) {
+        setTxState(prev => ({
+          ...prev,
+          subState: 'error',
+          error: {
+            title: 'Deposit Failed',
+            message: 'Deposit transaction failed.',
+            action: 'Please try again.',
+          },
+        }))
+        orchestratingRef.current = false
+        return
+      }
+
+      // Verify vault has holdings
+      console.log('Verifying deposit on-chain...')
+      const hasHoldings = await verifyVaultHasHoldings(currentVaultAddress)
+      if (!hasHoldings) {
+        setTxState(prev => ({
+          ...prev,
+          subState: 'error',
+          error: {
+            title: 'Verification Failed',
+            message: 'Could not verify deposit completed.',
+            action: 'Check your vault on Basescan.',
+          },
+        }))
+        orchestratingRef.current = false
+        return
+      }
+
+      // ============================================
+      // SUCCESS - All steps verified on-chain
+      // ============================================
+
+      setTxState(prev => ({
+        ...prev,
+        step: 'complete',
+        subState: 'confirmed',
+        depositVerified: true,
+      }))
+
+      // Store vault in localStorage
+      storeVault(address, allocation, currentVaultAddress)
+
+      console.log('Deposit complete and verified!')
+
+      // Redirect to portfolio after brief delay
       setTimeout(() => {
         router.push('/portfolio')
-      }, 1500)
-    }
-  }, [isDepositSuccess, vaultAddress, selectedAllocation, address, router])
+      }, 2000)
 
-  // Handle errors with human-readable messages
-  useEffect(() => {
-    const rawError = createError || approveError || depositError
-    if (rawError) {
-      const parsed = parseError(rawError)
-      setError({
-        title: parsed.title,
-        message: parsed.message,
-        action: parsed.action,
-      })
-      setStep('review') // Go back to review to retry
+    } catch (error) {
+      console.error('Orchestration error:', error)
+      const parsed = parseTransactionError(error)
+      setTxState(prev => ({
+        ...prev,
+        subState: 'error',
+        error: parsed,
+      }))
+    } finally {
+      orchestratingRef.current = false
     }
-  }, [createError, approveError, depositError])
+  }, [address, selectedAllocation, existingVaultAddress, depositAmountWei, writeContractAsync, router])
 
-  // Allocation selection
-  const handleAllocationSelect = useCallback((allocation: AllocationPresetType) => {
+  // ============================================
+  // UI HANDLERS
+  // ============================================
+
+  const handleAllocationSelect = useCallback(async (allocation: AllocationPresetType) => {
     setSelectedAllocation(allocation)
-    setError(null)
+    setInputError(null)
 
     if (address) {
-      const existingVault = getStoredVault(address, allocation.id)
-      if (existingVault) {
-        setVaultAddress(existingVault)
+      // Check localStorage first (fast)
+      const storedVault = getStoredVault(address, allocation.id)
+      if (storedVault) {
+        setExistingVaultAddress(storedVault)
       } else {
-        setVaultAddress(null)
+        // Check on-chain (slower but authoritative)
+        const onChainVault = await verifyVaultExists(address, allocation.id)
+        if (onChainVault) {
+          setExistingVaultAddress(onChainVault)
+          storeVault(address, allocation.id, onChainVault) // sync localStorage
+        } else {
+          setExistingVaultAddress(null)
+        }
       }
     }
   }, [address])
 
-  // Amount input
   const handleAmountChange = (value: string) => {
     if (/^\d*\.?\d*$/.test(value)) {
       setAmount(value)
-      setError(null)
+      setInputError(null)
     }
   }
 
-  // Navigation
   const goToAmount = () => {
     if (selectedAllocation) {
-      setStep('amount')
+      setSetupStep('amount')
     }
   }
 
   const goToReview = () => {
     const depositAmount = parseFloat(amount)
     if (depositAmount <= 0) {
-      setError({
-        title: 'Enter an amount',
-        message: 'Please enter how much USDC to deposit.',
-      })
+      setInputError('Please enter an amount')
       return
     }
     if (depositAmount > parseFloat(usdcBalance)) {
-      setError({
-        title: 'Insufficient balance',
-        message: `You have ${parseFloat(usdcBalance).toLocaleString()} USDC available.`,
-      })
+      setInputError(`You have ${parseFloat(usdcBalance).toLocaleString()} USDC available`)
       return
     }
-    setError(null)
-    setStep('review')
+    setInputError(null)
+    setSetupStep('review')
   }
 
   const goBack = () => {
-    setError(null)
-    if (step === 'amount') setStep('allocation')
-    if (step === 'review') setStep('amount')
+    setInputError(null)
+    if (setupStep === 'amount') setSetupStep('allocation')
+    if (setupStep === 'review') setSetupStep('amount')
   }
 
-  // Start the deposit flow
-  const handleConfirm = async () => {
+  const handleConfirm = () => {
     if (!selectedAllocation || !factoryConfigured) return
+    setSetupStep('processing')
+    setTxState(INITIAL_STATE)
+    // Start orchestration
+    runOrchestration()
+  }
 
-    setError(null)
-    setStep('processing')
+  const handleRetry = () => {
+    setTxState(INITIAL_STATE)
+    runOrchestration()
+  }
 
-    const depositAmount = parseUnits(amount, 6)
-
-    // If vault already exists, go straight to approve/deposit
-    if (vaultAddress) {
-      if (allowance < depositAmount) {
-        setProcessingPhase('approving_usdc')
-        approve(vaultAddress, depositAmount)
-      } else {
-        setProcessingPhase('depositing')
-        deposit(amount)
-      }
-      return
-    }
-
-    // Need to create vault first
-    setProcessingPhase('creating_vault')
-    createVault(selectedAllocation.id)
+  const handleCancel = () => {
+    setTxState(INITIAL_STATE)
+    setSetupStep('review')
   }
 
   if (!isConnected) return null
 
   // ============================================
-  // STEP 1: Allocation Selection
+  // RENDER: Allocation Selection
   // ============================================
-  if (step === 'allocation') {
+  if (setupStep === 'allocation') {
     return (
       <div className="flex flex-col min-h-[85vh]">
         <button
@@ -267,7 +486,6 @@ export default function SetupPage() {
           ← Back
         </button>
 
-        {/* Progress indicator */}
         <div className="flex gap-2 mb-8">
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
           <div className="h-1 flex-1 rounded-full bg-[var(--border)]" />
@@ -315,9 +533,9 @@ export default function SetupPage() {
   }
 
   // ============================================
-  // STEP 2: Amount Input
+  // RENDER: Amount Input
   // ============================================
-  if (step === 'amount') {
+  if (setupStep === 'amount') {
     return (
       <div className="flex flex-col min-h-[85vh]">
         <button
@@ -327,7 +545,6 @@ export default function SetupPage() {
           ← Back
         </button>
 
-        {/* Progress indicator */}
         <div className="flex gap-2 mb-8">
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
@@ -335,9 +552,7 @@ export default function SetupPage() {
         </div>
 
         <h1 className="text-3xl font-semibold mb-2">Enter amount</h1>
-        <p className="text-[var(--muted)] mb-8">
-          How much USDC to deposit?
-        </p>
+        <p className="text-[var(--muted)] mb-8">How much USDC to deposit?</p>
 
         <div className="flex-1 flex flex-col justify-center">
           <div className="text-center mb-8">
@@ -356,10 +571,7 @@ export default function SetupPage() {
             </div>
           </div>
 
-          <button
-            onClick={() => setAmount(usdcBalance)}
-            className="mx-auto mb-4"
-          >
+          <button onClick={() => setAmount(usdcBalance)} className="mx-auto mb-4">
             <Card variant="default" className="text-center px-6 py-3 hover:bg-[var(--background-tertiary)] transition-colors">
               <p className="text-sm text-[var(--muted)]">
                 Available: <span className="text-[var(--foreground)] font-medium">${parseFloat(usdcBalance).toLocaleString()}</span>
@@ -367,20 +579,14 @@ export default function SetupPage() {
             </Card>
           </button>
 
-          {error && (
+          {inputError && (
             <Card variant="default" className="bg-red-500/10 border border-red-500/20 mt-3">
-              <p className="text-sm text-red-400 text-center font-medium">{error.title}</p>
-              <p className="text-xs text-red-400/70 text-center mt-1">{error.message}</p>
+              <p className="text-sm text-red-400 text-center">{inputError}</p>
             </Card>
           )}
         </div>
 
-        <Button
-          size="large"
-          onClick={goToReview}
-          disabled={!amount || parseFloat(amount) <= 0}
-          className="mt-6"
-        >
+        <Button size="large" onClick={goToReview} disabled={!amount || parseFloat(amount) <= 0} className="mt-6">
           Continue
         </Button>
       </div>
@@ -388,9 +594,9 @@ export default function SetupPage() {
   }
 
   // ============================================
-  // STEP 3: Review
+  // RENDER: Review
   // ============================================
-  if (step === 'review') {
+  if (setupStep === 'review') {
     const btcAmount = (parseFloat(amount) * (selectedAllocation?.btcPct ?? 0) / 100)
     const usdcAmount = (parseFloat(amount) * (100 - (selectedAllocation?.btcPct ?? 0)) / 100)
 
@@ -403,7 +609,6 @@ export default function SetupPage() {
           ← Back
         </button>
 
-        {/* Progress indicator */}
         <div className="flex gap-2 mb-8">
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
@@ -413,13 +618,11 @@ export default function SetupPage() {
         <h1 className="text-3xl font-semibold mb-8">Review</h1>
 
         <div className="flex-1 space-y-4">
-          {/* Total deposit */}
           <Card variant="elevated" padding="large">
             <div className="text-sm text-[var(--muted)] mb-1">Depositing</div>
             <div className="font-semibold text-3xl">${parseFloat(amount).toLocaleString()}</div>
           </Card>
 
-          {/* Allocation breakdown */}
           <Card variant="elevated" padding="large">
             <div className="text-sm text-[var(--muted)] mb-3">Will be split into</div>
             <div className="space-y-3">
@@ -438,67 +641,52 @@ export default function SetupPage() {
                 <span className="font-medium">~${usdcAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
               </div>
             </div>
-            {/* Visual bar */}
             <div className="h-2 rounded-full overflow-hidden bg-[var(--border)] flex mt-4">
               <div className="bg-orange-500" style={{ width: `${selectedAllocation?.btcPct}%` }} />
               <div className="bg-blue-500" style={{ width: `${100 - (selectedAllocation?.btcPct ?? 0)}%` }} />
             </div>
           </Card>
 
-          {/* Error display */}
-          {error && (
-            <Card variant="default" className="bg-red-500/10 border border-red-500/20">
-              <p className="text-sm text-red-400 font-medium">{error.title}</p>
-              <p className="text-xs text-red-400/70 mt-1">{error.message}</p>
-              {error.action && (
-                <p className="text-xs text-[var(--muted)] mt-2">{error.action}</p>
-              )}
-            </Card>
-          )}
-
-          {/* Info about what happens next */}
           <Card variant="default" padding="default">
             <p className="text-xs text-[var(--muted)]">
-              {vaultAddress
-                ? 'You will be asked to approve USDC spending, then confirm the deposit.'
-                : 'You will be asked to create your vault, approve USDC spending, then confirm the deposit.'}
+              {existingVaultAddress
+                ? 'You will approve USDC spending, then confirm the deposit. Each step requires wallet confirmation.'
+                : 'You will create your vault, approve USDC spending, then confirm the deposit. Each step requires wallet confirmation.'}
             </p>
           </Card>
         </div>
 
         <div className="mt-8 space-y-3">
-          <Button
-            size="large"
-            onClick={handleConfirm}
-            disabled={!factoryConfigured}
-          >
-            {vaultAddress ? 'Deposit' : 'Create Vault & Deposit'}
+          <Button size="large" onClick={handleConfirm} disabled={!factoryConfigured}>
+            {existingVaultAddress ? 'Deposit' : 'Create Vault & Deposit'}
           </Button>
-
-          {!factoryConfigured && (
-            <p className="text-center text-xs text-[var(--warning)]">
-              Preview mode — deployment pending
-            </p>
-          )}
         </div>
       </div>
     )
   }
 
   // ============================================
-  // STEP 4: Processing
+  // RENDER: Processing
   // ============================================
-  const phase = PHASE_MESSAGES[processingPhase]
+  const message = getStateMessage(txState)
+  const isError = txState.subState === 'error'
+  const isComplete = txState.step === 'complete' && txState.subState === 'confirmed'
 
   return (
     <div className="flex flex-col min-h-[85vh] items-center justify-center">
       <div className="text-center max-w-xs">
-        {/* Spinner or checkmark */}
+        {/* Status indicator */}
         <div className="mb-8">
-          {processingPhase === 'complete' ? (
+          {isComplete ? (
             <div className="w-16 h-16 mx-auto rounded-full bg-green-500/20 flex items-center justify-center">
               <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+          ) : isError ? (
+            <div className="w-16 h-16 mx-auto rounded-full bg-red-500/20 flex items-center justify-center">
+              <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </div>
           ) : (
@@ -506,34 +694,67 @@ export default function SetupPage() {
           )}
         </div>
 
-        <h2 className="text-xl font-semibold mb-2">{phase.title}</h2>
-        <p className="text-[var(--muted)]">{phase.subtitle}</p>
+        <h2 className="text-xl font-semibold mb-2">{message.title}</h2>
+        <p className="text-[var(--muted)]">{message.subtitle}</p>
 
-        {/* Progress steps */}
-        <div className="mt-8 space-y-2">
-          <ProcessingStep
-            label="Create vault"
-            status={getStepStatus('vault', processingPhase, vaultAddress)}
-            show={!vaultAddress}
-          />
-          <ProcessingStep
-            label="Approve USDC"
-            status={getStepStatus('approve', processingPhase, vaultAddress)}
-            show={true}
-          />
-          <ProcessingStep
-            label="Deposit funds"
-            status={getStepStatus('deposit', processingPhase, vaultAddress)}
-            show={true}
-          />
-        </div>
+        {/* Error action */}
+        {isError && txState.error?.action && (
+          <p className="text-sm text-[var(--muted)] mt-4">{txState.error.action}</p>
+        )}
+
+        {/* Progress steps - only show when not in error or complete */}
+        {!isError && !isComplete && (
+          <div className="mt-8 space-y-3 text-left">
+            <StepIndicator
+              label="Create vault"
+              status={getIndicatorStatus('create_vault', txState)}
+              show={!existingVaultAddress}
+            />
+            <StepIndicator
+              label="Approve USDC"
+              status={getIndicatorStatus('approve_usdc', txState)}
+              show={true}
+            />
+            <StepIndicator
+              label="Deposit funds"
+              status={getIndicatorStatus('deposit', txState)}
+              show={true}
+            />
+          </div>
+        )}
+
+        {/* Action buttons */}
+        {isError && (
+          <div className="mt-8 space-y-3">
+            <Button size="large" onClick={handleRetry}>
+              Try Again
+            </Button>
+            <button
+              onClick={handleCancel}
+              className="w-full text-center text-sm text-[var(--muted)] hover:text-[var(--foreground)] py-3"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+        {isComplete && (
+          <div className="mt-8">
+            <Button size="large" onClick={() => router.push('/portfolio')}>
+              View Portfolio
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-// Helper component for processing steps
-function ProcessingStep({
+// ============================================
+// HELPER COMPONENTS
+// ============================================
+
+function StepIndicator({
   label,
   status,
   show,
@@ -547,64 +768,46 @@ function ProcessingStep({
   return (
     <div className="flex items-center gap-3 text-sm">
       {status === 'complete' && (
-        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center">
+        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0">
           <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
           </svg>
         </div>
       )}
       {status === 'active' && (
-        <div className="w-5 h-5 rounded-full border-2 border-[var(--primary)] border-t-transparent animate-spin" />
+        <div className="w-5 h-5 rounded-full border-2 border-[var(--primary)] border-t-transparent animate-spin flex-shrink-0" />
       )}
       {status === 'pending' && (
-        <div className="w-5 h-5 rounded-full border-2 border-[var(--border)]" />
+        <div className="w-5 h-5 rounded-full border-2 border-[var(--border)] flex-shrink-0" />
       )}
       <span className={status === 'pending' ? 'text-[var(--muted)]' : ''}>{label}</span>
     </div>
   )
 }
 
-// Helper to determine step status
-function getStepStatus(
-  step: 'vault' | 'approve' | 'deposit',
-  phase: ProcessingPhase,
-  hasVault: Address | null,
+function getIndicatorStatus(
+  step: TxStep,
+  state: OrchestratorState,
 ): 'pending' | 'active' | 'complete' {
-  const phaseOrder: ProcessingPhase[] = [
-    'creating_vault',
-    'awaiting_vault_confirm',
-    'approving_usdc',
-    'awaiting_approve_confirm',
-    'depositing',
-    'awaiting_deposit_confirm',
-    'complete',
-  ]
+  const { step: currentStep, subState, vaultVerified, allowanceVerified, depositVerified } = state
 
-  const currentIndex = phaseOrder.indexOf(phase)
-
-  if (step === 'vault') {
-    if (hasVault) return 'complete' // Already had vault
-    if (currentIndex <= 1) return 'active'
-    return 'complete'
+  if (step === 'create_vault') {
+    if (vaultVerified) return 'complete'
+    if (currentStep === 'create_vault') return 'active'
+    return 'pending'
   }
 
-  if (step === 'approve') {
-    if (hasVault) {
-      // Started with vault, approve is first step
-      if (currentIndex <= 1) return 'pending'
-      if (currentIndex <= 3) return 'active'
-      return 'complete'
-    }
-    // Needed to create vault first
-    if (currentIndex <= 1) return 'pending'
-    if (currentIndex <= 3) return 'active'
-    return 'complete'
+  if (step === 'approve_usdc') {
+    if (allowanceVerified) return 'complete'
+    if (currentStep === 'approve_usdc') return 'active'
+    if (vaultVerified && currentStep === 'create_vault' && subState === 'confirmed') return 'pending'
+    return 'pending'
   }
 
   if (step === 'deposit') {
-    if (currentIndex <= 3) return 'pending'
-    if (currentIndex <= 5) return 'active'
-    return 'complete'
+    if (depositVerified) return 'complete'
+    if (currentStep === 'deposit') return 'active'
+    return 'pending'
   }
 
   return 'pending'

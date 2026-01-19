@@ -1,6 +1,6 @@
 # Next Action Required
 
-**Status:** READY - UX Remediation Complete
+**Status:** READY - Transaction Orchestration Fixed
 
 **Last Updated:** 2026-01-19
 
@@ -8,11 +8,18 @@
 
 ## No Immediate Action Required
 
-UX remediation has been completed. The web app is ready for re-testing.
+Transaction orchestration has been fixed. The web app is ready for re-testing.
 
 ---
 
 ## What Changed
+
+### Transaction Orchestration (Critical Fix)
+- Chain-verified state machine ensures UI only advances after on-chain confirmation
+- Vault address extracted from VaultDeployed event logs (not localStorage assumptions)
+- Each step verifies on-chain state before proceeding to next step
+- User rejections handled gracefully with human-readable error messages
+- Processing screen shows live status for each transaction step
 
 ### Onboarding Flow
 - Welcome screen explains Meezan before asking for wallet connection
@@ -41,12 +48,13 @@ UX remediation has been completed. The web app is ready for re-testing.
 
 | File | Changes |
 |------|---------|
+| `lib/tx-orchestrator.ts` | Chain-verified transaction state machine (new) |
+| `app/setup/page.tsx` | Rewritten with strict transaction sequencing |
 | `app/page.tsx` | 3-screen onboarding wizard |
-| `app/setup/page.tsx` | Progress bar, processing states, error handling |
 | `app/portfolio/page.tsx` | Withdraw primary, error handling |
 | `app/details/page.tsx` | Rebalance error handling |
-| `lib/errors.ts` | Human-readable error parser (new) |
-| `ops/STATUS.md` | UX state diagram |
+| `lib/errors.ts` | Human-readable error parser |
+| `ops/STATUS.md` | Transaction state machine diagram |
 
 ---
 
@@ -81,5 +89,6 @@ To verify the UX improvements:
 - [x] Status monitoring implemented
 - [x] Launch checklist created
 - [x] UX remediation complete
+- [x] Transaction orchestration fixed (chain-verified)
 - [ ] Final re-test (optional)
 - [ ] Push to remote
