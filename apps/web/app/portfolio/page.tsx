@@ -4,14 +4,41 @@ import { Suspense, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount } from 'wagmi'
-import { type Address } from 'viem'
+import { type Address, formatUnits } from 'viem'
 import { Button } from '@/components/Button'
-import { Card } from '@/components/Card'
 import { useVaultState, useWithdraw } from '@/lib/hooks'
-import { getUserVaults, getStoredVault } from '@/lib/store'
+import { getUserVaults, getStoredVault, storeVault } from '@/lib/store'
 import { parseError } from '@/lib/errors'
+import { verifyVaultExists } from '@/lib/tx-orchestrator'
+import { ALLOCATION_PRESETS } from '@/lib/contracts'
 
 type WithdrawState = 'idle' | 'confirming' | 'pending' | 'success' | 'error'
+
+function formatUsd(value: number): string {
+  if (value === 0) return '$0'
+  if (value < 0.01) return '<$0.01'
+  if (value >= 1000) {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value)
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+}
+
+function formatBtc(satoshis: bigint): string {
+  const btc = Number(formatUnits(satoshis, 8))
+  if (btc === 0) return '0'
+  if (btc < 0.0001) return '<0.0001'
+  return btc.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 6 })
+}
 
 function PortfolioContent() {
   const router = useRouter()
@@ -20,44 +47,62 @@ function PortfolioContent() {
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
   const [withdrawState, setWithdrawState] = useState<WithdrawState>('idle')
   const [withdrawError, setWithdrawError] = useState<{ title: string; message: string } | null>(null)
+  const [mounted, setMounted] = useState(false)
 
-  const { values, allocations, allocation } = useVaultState(vaultAddress)
+  const { values, allocation, holdings, drift, lastUpdated, isLoading, refetch } = useVaultState(vaultAddress)
   const { withdraw, isPending, isConfirming, isSuccess, error: rawWithdrawError } = useWithdraw(vaultAddress)
 
-  // Find vault
   useEffect(() => {
-    if (!address) return
+    setMounted(true)
+  }, [])
 
-    const riskParam = searchParams.get('risk')
-    if (riskParam) {
-      const storedVault = getStoredVault(address, parseInt(riskParam))
-      if (storedVault) {
-        setVaultAddress(storedVault)
+  useEffect(() => {
+    if (!mounted || !address) return
+
+    const findVault = async () => {
+      const riskParam = searchParams.get('risk')
+      if (riskParam) {
+        const storedVault = getStoredVault(address, parseInt(riskParam))
+        if (storedVault) {
+          setVaultAddress(storedVault)
+          return
+        }
+      }
+
+      const userVaults = getUserVaults(address)
+      if (userVaults.length > 0) {
+        setVaultAddress(userVaults[0].address)
         return
+      }
+
+      for (const preset of ALLOCATION_PRESETS) {
+        const onChainVault = await verifyVaultExists(address, preset.id)
+        if (onChainVault) {
+          storeVault(address, preset.id, onChainVault)
+          setVaultAddress(onChainVault)
+          return
+        }
       }
     }
 
-    const userVaults = getUserVaults(address)
-    if (userVaults.length > 0) {
-      setVaultAddress(userVaults[0].address)
-    }
-  }, [address, searchParams])
+    findVault()
+  }, [mounted, address, searchParams])
 
-  // Redirect if not connected
   useEffect(() => {
-    if (!isConnected) {
+    if (mounted && !isConnected) {
       router.push('/')
     }
-  }, [isConnected, router])
+  }, [mounted, isConnected, router])
 
-  // Track withdraw state
   useEffect(() => {
     if (isPending) setWithdrawState('confirming')
     else if (isConfirming) setWithdrawState('pending')
-    else if (isSuccess) setWithdrawState('success')
-  }, [isPending, isConfirming, isSuccess])
+    else if (isSuccess) {
+      setWithdrawState('success')
+      setTimeout(() => refetch(), 2000)
+    }
+  }, [isPending, isConfirming, isSuccess, refetch])
 
-  // Handle withdraw errors
   useEffect(() => {
     if (rawWithdrawError) {
       const parsed = parseError(rawWithdrawError)
@@ -66,16 +111,13 @@ function PortfolioContent() {
     }
   }, [rawWithdrawError])
 
-  // Reset after success
   useEffect(() => {
     if (isSuccess) {
-      setTimeout(() => {
-        setWithdrawState('idle')
-      }, 3000)
+      setTimeout(() => setWithdrawState('idle'), 3000)
     }
   }, [isSuccess])
 
-  if (!isConnected) return null
+  if (!mounted || !isConnected) return null
 
   const handleWithdraw = () => {
     setWithdrawError(null)
@@ -88,16 +130,13 @@ function PortfolioContent() {
     setWithdrawState('idle')
   }
 
-  // No vault found
+  // No vault state
   if (!vaultAddress && address) {
     const userVaults = getUserVaults(address)
     if (userVaults.length === 0) {
       return (
         <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
-          <h1 className="text-2xl font-semibold mb-2">No vault found</h1>
-          <p className="text-[var(--muted)] mb-8">
-            Create a vault to get started.
-          </p>
+          <p className="text-[var(--muted)] mb-8">No vault yet</p>
           <Link href="/setup">
             <Button>Create Vault</Button>
           </Link>
@@ -106,138 +145,121 @@ function PortfolioContent() {
     }
   }
 
-  // Withdraw success state
+  // Transaction states
   if (withdrawState === 'success') {
     return (
-      <div className="flex flex-col min-h-[85vh] items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 mx-auto rounded-full bg-green-500/20 flex items-center justify-center mb-6">
-            <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h2 className="text-xl font-semibold mb-2">Withdrawal complete</h2>
-          <p className="text-[var(--muted)]">Funds have been sent to your wallet.</p>
-        </div>
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">Withdrawal complete</p>
+        <p className="text-sm text-[var(--muted)]">Funds sent to your wallet</p>
       </div>
     )
   }
 
-  // Withdraw processing state
-  if (withdrawState === 'confirming' || withdrawState === 'pending') {
+  if (withdrawState === 'error' && withdrawError) {
     return (
-      <div className="flex flex-col min-h-[85vh] items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 mx-auto rounded-full border-4 border-[var(--border)] border-t-[var(--primary)] animate-spin mb-6" />
-          <h2 className="text-xl font-semibold mb-2">
-            {withdrawState === 'confirming' ? 'Confirm in wallet' : 'Processing...'}
-          </h2>
-          <p className="text-[var(--muted)]">
-            {withdrawState === 'confirming'
-              ? 'Approve the withdrawal in your wallet'
-              : 'Waiting for confirmation...'}
-          </p>
-        </div>
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">{withdrawError.title}</p>
+        <p className="text-sm text-[var(--muted)] mb-8">{withdrawError.message}</p>
+        <button onClick={dismissError} className="text-[var(--primary)] text-sm">
+          Dismiss
+        </button>
       </div>
     )
   }
+
+  if (withdrawState === 'confirming' || withdrawState === 'pending') {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">
+          {withdrawState === 'confirming' ? 'Confirm in wallet' : 'Processing'}
+        </p>
+        <p className="text-sm text-[var(--muted)]">
+          {withdrawState === 'confirming' ? 'Approve the transaction' : 'This may take a moment'}
+        </p>
+      </div>
+    )
+  }
+
+  const hasBalance = values.total > 0
+  const isOnTrack = drift < 5
+
+  // Time context
+  const timeContext = lastUpdated
+    ? Math.floor((Date.now() - lastUpdated.getTime()) / 1000) < 30
+      ? 'Just now'
+      : lastUpdated.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : null
 
   return (
     <div className="flex flex-col min-h-[85vh]">
-      {/* Header */}
-      <div className="mb-6">
-        <p className="text-sm text-[var(--muted)] mb-1">
-          {allocation?.name ?? '—'} allocation
+      {/* Balance */}
+      <div className="flex-1 flex flex-col justify-center items-center">
+        <p className="text-[64px] font-extralight tracking-tight mb-6">
+          {isLoading ? (
+            <span className="opacity-20">—</span>
+          ) : (
+            formatUsd(values.total)
+          )}
         </p>
-        <h1 className="text-2xl font-semibold">Your Vault</h1>
+
+        {/* System status */}
+        {hasBalance && !isLoading && (
+          <div className="text-center space-y-1">
+            {isOnTrack ? (
+              <p className="text-[var(--muted)] text-sm">
+                Allocation automatically maintained
+              </p>
+            ) : (
+              <p className="text-[var(--warning)] text-sm">
+                {drift.toFixed(1)}% from target
+              </p>
+            )}
+            {timeContext && (
+              <p className="text-[var(--muted)] text-xs opacity-50">
+                {timeContext}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Total Value */}
-      <Card variant="elevated" padding="large" className="text-center mb-6">
-        <p className="text-5xl font-semibold tracking-tight">
-          ${values.total.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-        </p>
-        <p className="text-sm text-[var(--muted)] mt-3">
-          Current: {allocations.current.btc.toFixed(0)}% BTC / {allocations.current.usdc.toFixed(0)}% USDC
-        </p>
-      </Card>
-
-      {/* Allocation breakdown */}
-      <div className="grid grid-cols-2 gap-3 mb-6">
-        <Card variant="default" padding="default">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-2 h-2 rounded-full bg-orange-500" />
-            <span className="text-sm text-[var(--muted)]">BTC</span>
+      {/* Holdings */}
+      {hasBalance && !isLoading && (
+        <div className="border-t border-[var(--border)] py-8">
+          <div className="flex justify-between items-baseline mb-5">
+            <span className="text-[var(--muted)] text-sm">Bitcoin</span>
+            <span className="tabular-nums">
+              {formatUsd(values.btc)}
+              <span className="text-[var(--muted)] text-xs ml-2">{formatBtc(holdings.btc)}</span>
+            </span>
           </div>
-          <p className="text-xl font-semibold">
-            ${values.btc.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-          </p>
-        </Card>
-        <Card variant="default" padding="default">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-2 h-2 rounded-full bg-blue-500" />
-            <span className="text-sm text-[var(--muted)]">USDC</span>
+          <div className="flex justify-between items-baseline">
+            <span className="text-[var(--muted)] text-sm">USDC</span>
+            <span className="tabular-nums">
+              {formatUsd(values.usdc)}
+              <span className="text-[var(--muted)] text-xs ml-2">{Number(formatUnits(holdings.usdc, 6)).toFixed(2)}</span>
+            </span>
           </div>
-          <p className="text-xl font-semibold">
-            ${values.usdc.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-          </p>
-        </Card>
-      </div>
-
-      {/* Allocation bar */}
-      <div className="h-2 rounded-full overflow-hidden bg-[var(--background-secondary)] mb-6">
-        <div
-          className="h-full bg-orange-500 transition-all duration-500"
-          style={{ width: `${allocations.current.btc}%` }}
-        />
-      </div>
-
-      {/* Error display */}
-      {withdrawError && (
-        <Card variant="default" className="bg-red-500/10 border border-red-500/20 mb-4">
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-sm text-red-400 font-medium">{withdrawError.title}</p>
-              <p className="text-xs text-red-400/70 mt-1">{withdrawError.message}</p>
-            </div>
-            <button onClick={dismissError} className="text-red-400 hover:text-red-300">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </Card>
+        </div>
       )}
 
-      {/* Actions - Withdraw is PRIMARY and always visible */}
-      <div className="mt-auto space-y-3">
-        {/* Withdraw - always prominent */}
-        <Button
-          size="large"
-          onClick={handleWithdraw}
-          disabled={values.total === 0}
-        >
-          Withdraw All
-        </Button>
-
-        {/* Secondary actions */}
-        <div className="grid grid-cols-2 gap-3">
-          <Link href="/setup" className="block">
-            <Button size="large" variant="secondary" className="w-full">
-              Deposit More
-            </Button>
+      {/* Actions */}
+      <div className="border-t border-[var(--border)] py-6">
+        <div className="flex justify-center gap-8 text-sm text-[var(--muted)]">
+          <Link href="/setup" className="hover:text-[var(--foreground)]">
+            Deposit
           </Link>
-          <Link href={`/details${vaultAddress ? `?vault=${vaultAddress}` : ''}`} className="block">
-            <Button size="large" variant="secondary" className="w-full">
-              Details
-            </Button>
-          </Link>
+          {hasBalance && (
+            <>
+              <button onClick={handleWithdraw} className="hover:text-[var(--foreground)]">
+                Withdraw
+              </button>
+              <Link href={`/details?vault=${vaultAddress}`} className="hover:text-[var(--foreground)]">
+                Details
+              </Link>
+            </>
+          )}
         </div>
-
-        {/* Reassurance */}
-        <p className="text-center text-xs text-[var(--muted)] pt-2">
-          Withdraw sends all funds to your wallet.
-        </p>
       </div>
     </div>
   )
@@ -246,8 +268,8 @@ function PortfolioContent() {
 export default function PortfolioPage() {
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center min-h-[85vh]">
-        <div className="w-8 h-8 rounded-full border-3 border-[var(--border)] border-t-[var(--primary)] animate-spin" />
+      <div className="flex flex-col min-h-[85vh] items-center justify-center">
+        <span className="text-[var(--muted)] opacity-20">—</span>
       </div>
     }>
       <PortfolioContent />

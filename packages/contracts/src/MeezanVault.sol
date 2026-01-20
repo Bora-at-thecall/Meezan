@@ -16,9 +16,10 @@ contract MeezanVault is ReentrancyGuard, Pausable {
 
     uint16 public constant DEFAULT_DRIFT_BPS = 500;
     uint32 public constant COOLDOWN_SECONDS = 43200;
-    uint32 public constant MAX_PRICE_STALENESS = 3600;
+    uint32 public constant MAX_PRICE_STALENESS = 3600;        // 1 hour for volatile assets (BTC)
+    uint32 public constant MAX_PRICE_STALENESS_STABLE = 90000; // 25 hours for stablecoins (USDC)
     uint256 private constant USD_PRECISION = 1e18;
-    uint256 public constant MIN_SWAP_USD = 10e18;
+    uint256 public constant MIN_SWAP_USD = 1e18; // $1 minimum to allow small test deposits
     uint256 private constant BPS_DENOMINATOR = 10000;
     uint16 public constant MIN_SLIPPAGE_BPS = 10;
     uint16 public constant MAX_SLIPPAGE_BPS = 500;
@@ -205,10 +206,10 @@ contract MeezanVault is ReentrancyGuard, Pausable {
 
         tokenB.safeTransferFrom(msg.sender, address(this), amountUSDC);
 
-        uint256 currentValueA = _usdValue(tokenA.balanceOf(address(this)), tokenDecimalsA, priceFeedA, feedDecimalsA);
-        uint256 depositValueB = _usdValue(amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB);
+        uint256 currentValueA = _usdValue(tokenA.balanceOf(address(this)), tokenDecimalsA, priceFeedA, feedDecimalsA, MAX_PRICE_STALENESS);
+        uint256 depositValueB = _usdValue(amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB, MAX_PRICE_STALENESS_STABLE);
         uint256 currentValueB =
-            _usdValue(tokenB.balanceOf(address(this)) - amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB);
+            _usdValue(tokenB.balanceOf(address(this)) - amountUSDC, tokenDecimalsB, priceFeedB, feedDecimalsB, MAX_PRICE_STALENESS_STABLE);
 
         uint256 totalUsdAfter = currentValueA + currentValueB + depositValueB;
         uint256 desiredUsdA = Math.mulDiv(totalUsdAfter, targetPctA, BPS_DENOMINATOR);
@@ -225,7 +226,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
             return;
         }
 
-        uint256 priceA = _getPrice(priceFeedA);
+        uint256 priceA = _getPrice(priceFeedA, MAX_PRICE_STALENESS);
         uint256 wbtcToBuy = Math.mulDiv(usdToBuy, 10 ** feedDecimalsA, priceA);
         wbtcToBuy = Math.mulDiv(wbtcToBuy, 10 ** tokenDecimalsA, USD_PRECISION);
 
@@ -234,7 +235,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
             return;
         }
 
-        uint256 priceB = _getPrice(priceFeedB);
+        uint256 priceB = _getPrice(priceFeedB, MAX_PRICE_STALENESS_STABLE);
         uint256 oracleUsdcCost = Math.mulDiv(usdToBuy, 10 ** feedDecimalsB, priceB);
         oracleUsdcCost = Math.mulDiv(oracleUsdcCost, 10 ** tokenDecimalsB, USD_PRECISION);
 
@@ -250,7 +251,6 @@ contract MeezanVault is ReentrancyGuard, Pausable {
             tokenOut: address(tokenA),
             fee: poolFee,
             recipient: address(this),
-            deadline: block.timestamp + 300,
             amountOut: wbtcToBuy,
             amountInMaximum: maxUsdcIn,
             sqrtPriceLimitX96: 0
@@ -326,7 +326,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
             sellToken = address(tokenA);
             buyToken = address(tokenB);
 
-            uint256 priceB = _getPrice(priceFeedB);
+            uint256 priceB = _getPrice(priceFeedB, MAX_PRICE_STALENESS_STABLE);
             uint256 usdcToBuy = Math.mulDiv(usdToShift, 10 ** feedDecimalsB, priceB);
             usdcToBuy = Math.mulDiv(usdcToBuy, 10 ** tokenDecimalsB, USD_PRECISION);
 
@@ -336,7 +336,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
                 return;
             }
 
-            uint256 priceA = _getPrice(priceFeedA);
+            uint256 priceA = _getPrice(priceFeedA, MAX_PRICE_STALENESS);
             uint256 oracleWbtcCost = Math.mulDiv(usdToShift, 10 ** feedDecimalsA, priceA);
             oracleWbtcCost = Math.mulDiv(oracleWbtcCost, 10 ** tokenDecimalsA, USD_PRECISION);
             uint256 maxWbtcIn = Math.mulDiv(oracleWbtcCost, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
@@ -351,7 +351,6 @@ contract MeezanVault is ReentrancyGuard, Pausable {
                 tokenOut: address(tokenB),
                 fee: poolFee,
                 recipient: address(this),
-                deadline: block.timestamp + 300,
                 amountOut: usdcToBuy,
                 amountInMaximum: maxWbtcIn,
                 sqrtPriceLimitX96: 0
@@ -375,7 +374,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
             sellToken = address(tokenB);
             buyToken = address(tokenA);
 
-            uint256 priceA = _getPrice(priceFeedA);
+            uint256 priceA = _getPrice(priceFeedA, MAX_PRICE_STALENESS);
             uint256 wbtcToBuy = Math.mulDiv(usdToShift, 10 ** feedDecimalsA, priceA);
             wbtcToBuy = Math.mulDiv(wbtcToBuy, 10 ** tokenDecimalsA, USD_PRECISION);
 
@@ -385,7 +384,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
                 return;
             }
 
-            uint256 priceB = _getPrice(priceFeedB);
+            uint256 priceB = _getPrice(priceFeedB, MAX_PRICE_STALENESS_STABLE);
             uint256 oracleUsdcCost = Math.mulDiv(usdToShift, 10 ** feedDecimalsB, priceB);
             oracleUsdcCost = Math.mulDiv(oracleUsdcCost, 10 ** tokenDecimalsB, USD_PRECISION);
             uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
@@ -400,7 +399,6 @@ contract MeezanVault is ReentrancyGuard, Pausable {
                 tokenOut: address(tokenA),
                 fee: poolFee,
                 recipient: address(this),
-                deadline: block.timestamp + 300,
                 amountOut: wbtcToBuy,
                 amountInMaximum: maxUsdcIn,
                 sqrtPriceLimitX96: 0
@@ -457,34 +455,36 @@ contract MeezanVault is ReentrancyGuard, Pausable {
         uint256 balA = tokenA.balanceOf(address(this));
         uint256 balB = tokenB.balanceOf(address(this));
 
-        valueA = _usdValue(balA, tokenDecimalsA, priceFeedA, feedDecimalsA);
-        valueB = _usdValue(balB, tokenDecimalsB, priceFeedB, feedDecimalsB);
+        valueA = _usdValue(balA, tokenDecimalsA, priceFeedA, feedDecimalsA, MAX_PRICE_STALENESS);
+        valueB = _usdValue(balB, tokenDecimalsB, priceFeedB, feedDecimalsB, MAX_PRICE_STALENESS_STABLE);
     }
 
-    function _usdValue(uint256 amount, uint8 tokenDecimals, AggregatorV3Interface feed, uint8 feedDecimals)
-        internal
-        view
-        returns (uint256 value)
-    {
+    function _usdValue(
+        uint256 amount,
+        uint8 tokenDecimals,
+        AggregatorV3Interface feed,
+        uint8 feedDecimals,
+        uint32 maxStaleness
+    ) internal view returns (uint256 value) {
         if (amount == 0) return 0;
 
         (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
 
         if (answer <= 0) revert InvalidPrice();
         if (updatedAt == 0) revert StalePrice();
-        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (block.timestamp - updatedAt > maxStaleness) revert StalePrice();
         if (answeredInRound < roundId) revert IncompleteRound();
 
         value = Math.mulDiv(amount, uint256(answer), 10 ** tokenDecimals);
         value = Math.mulDiv(value, USD_PRECISION, 10 ** feedDecimals);
     }
 
-    function _getPrice(AggregatorV3Interface feed) internal view returns (uint256) {
+    function _getPrice(AggregatorV3Interface feed, uint32 maxStaleness) internal view returns (uint256) {
         (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
 
         if (answer <= 0) revert InvalidPrice();
         if (updatedAt == 0) revert StalePrice();
-        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (block.timestamp - updatedAt > maxStaleness) revert StalePrice();
         if (answeredInRound < roundId) revert IncompleteRound();
 
         return uint256(answer);

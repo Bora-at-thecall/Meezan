@@ -17,15 +17,52 @@
  * 10. verify holdings on-chain
  */
 
-import { createPublicClient, http, parseUnits, decodeEventLog, type Address, type Hash } from 'viem'
+import { createPublicClient, http, decodeEventLog, type Address, type Hash } from 'viem'
 import { base } from 'viem/chains'
 import { CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI } from './contracts'
 
-// Public client for chain reads
-const publicClient = createPublicClient({
+// Public client for chain reads with exponential backoff
+export const publicClient = createPublicClient({
   chain: base,
-  transport: http('https://mainnet.base.org'),
+  transport: http('https://mainnet.base.org', {
+    retryCount: 5,
+    retryDelay: 2000,
+  }),
+  pollingInterval: 5_000, // Poll every 5 seconds (reduce rate limit pressure)
 })
+
+/**
+ * Retry helper with exponential backoff for RPC calls
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number; description?: string } = {},
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 2000, description = 'RPC call' } = options
+
+  let lastError: unknown
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      lastError = error
+      const errorMsg = error instanceof Error ? error.message : String(error)
+
+      // Check for rate limit errors
+      const isRateLimit = errorMsg.includes('429') || errorMsg.includes('rate limit')
+
+      if (attempt < maxRetries) {
+        // Exponential backoff: 2s, 4s, 8s, etc. (longer for rate limits)
+        const delay = isRateLimit
+          ? baseDelay * Math.pow(2, attempt + 1) // Start at 4s for rate limits
+          : baseDelay * Math.pow(2, attempt)
+        console.log(`${description} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`)
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+  }
+  throw lastError
+}
 
 // ============================================
 // TYPES
@@ -142,7 +179,15 @@ export function getStateMessage(state: OrchestratorState): { title: string; subt
  */
 export async function extractVaultAddressFromReceipt(txHash: Hash): Promise<Address | null> {
   try {
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
+    console.log('Waiting for transaction receipt:', txHash)
+    // Use longer timeout and explicit polling
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+      timeout: 120_000, // 2 minutes
+      pollingInterval: 3_000, // Check every 3 seconds
+      confirmations: 1, // Just need 1 confirmation
+    })
+    console.log('Got receipt, status:', receipt.status)
 
     if (receipt.status !== 'success') {
       console.error('Transaction failed:', txHash)
@@ -186,12 +231,15 @@ export async function verifyVaultExists(
   allocation: number,
 ): Promise<Address | null> {
   try {
-    const vaultAddress = await publicClient.readContract({
-      address: CONTRACTS.factory,
-      abi: FACTORY_ABI,
-      functionName: 'getVault',
-      args: [owner, allocation],
-    })
+    const vaultAddress = await withRetry(
+      () => publicClient.readContract({
+        address: CONTRACTS.factory,
+        abi: FACTORY_ABI,
+        functionName: 'getVault',
+        args: [owner, allocation],
+      }),
+      { description: 'verifyVaultExists' },
+    )
 
     const isZeroAddress = vaultAddress === '0x0000000000000000000000000000000000000000'
     if (isZeroAddress) {
@@ -216,12 +264,15 @@ export async function verifyAllowance(
   requiredAmount: bigint,
 ): Promise<boolean> {
   try {
-    const allowance = await publicClient.readContract({
-      address: CONTRACTS.usdc,
-      abi: ERC20_ABI,
-      functionName: 'allowance',
-      args: [owner, spender],
-    })
+    const allowance = await withRetry(
+      () => publicClient.readContract({
+        address: CONTRACTS.usdc,
+        abi: ERC20_ABI,
+        functionName: 'allowance',
+        args: [owner, spender],
+      }),
+      { description: 'verifyAllowance' },
+    )
 
     const sufficient = allowance >= requiredAmount
     console.log('Verified allowance:', allowance, 'required:', requiredAmount, 'sufficient:', sufficient)
@@ -237,7 +288,13 @@ export async function verifyAllowance(
  */
 export async function waitForReceipt(txHash: Hash): Promise<boolean> {
   try {
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
+    console.log('Waiting for receipt:', txHash)
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+      timeout: 120_000, // 2 minutes
+      pollingInterval: 3_000, // Check every 3 seconds
+      confirmations: 1,
+    })
     const success = receipt.status === 'success'
     console.log('Transaction', txHash, 'success:', success)
     return success
@@ -252,15 +309,18 @@ export async function waitForReceipt(txHash: Hash): Promise<boolean> {
  */
 export async function verifyVaultHasHoldings(vaultAddress: Address): Promise<boolean> {
   try {
-    const holdings = await publicClient.readContract({
-      address: vaultAddress,
-      abi: VAULT_ABI,
-      functionName: 'holdings',
-    })
+    const holdings = await withRetry(
+      () => publicClient.readContract({
+        address: vaultAddress,
+        abi: VAULT_ABI,
+        functionName: 'holdings',
+      }),
+      { description: 'verifyVaultHasHoldings' },
+    )
 
     // Check if either token has a balance
     const [btcBalance, usdcBalance] = holdings as [bigint, bigint]
-    const hasHoldings = btcBalance > 0n || usdcBalance > 0n
+    const hasHoldings = btcBalance > BigInt(0) || usdcBalance > BigInt(0)
     console.log('Vault holdings - BTC:', btcBalance, 'USDC:', usdcBalance, 'has holdings:', hasHoldings)
     return hasHoldings
   } catch (error) {
@@ -300,6 +360,15 @@ export function parseTransactionError(error: unknown): { title: string; message:
       title: 'Insufficient ETH',
       message: 'You need ETH on Base to pay for gas.',
       action: 'Add ETH to your wallet.',
+    }
+  }
+
+  // Rate limit errors
+  if (message.includes('429') || message.includes('rate limit')) {
+    return {
+      title: 'Network Busy',
+      message: 'The network is experiencing high traffic.',
+      action: 'Wait a moment and try again.',
     }
   }
 

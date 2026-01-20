@@ -111,7 +111,7 @@ async function getVaultCount(): Promise<{ count: number; status: 'ok' | 'error' 
           { name: 'allocation', type: 'uint8', indexed: false },
         ],
       },
-      fromBlock: 40992707n, // Factory deployment block
+      fromBlock: BigInt(40992707), // Factory deployment block
       toBlock: 'latest',
     })
 

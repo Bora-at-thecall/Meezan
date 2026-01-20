@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
+import { useAccount, useWriteContract, useChainId, useSwitchChain } from 'wagmi'
+import { base } from 'wagmi/chains'
 import { Button } from '@/components/Button'
 import { Card } from '@/components/Card'
 import { ALLOCATION_PRESETS, type AllocationPresetType, CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI } from '@/lib/contracts'
@@ -19,6 +20,7 @@ import {
   waitForReceipt,
   verifyVaultHasHoldings,
   parseTransactionError,
+  publicClient,
 } from '@/lib/tx-orchestrator'
 import { parseUnits, type Address, type Hash } from 'viem'
 
@@ -42,10 +44,15 @@ export default function SetupPage() {
   const orchestratingRef = useRef(false)
 
   // Amount in wei for contract calls
-  const depositAmountWei = amount ? parseUnits(amount, 6) : 0n
+  const depositAmountWei = amount ? parseUnits(amount, 6) : BigInt(0)
 
   // Contract hooks
   const { formatted: usdcBalance } = useUsdcBalance()
+
+  // Chain check
+  const chainId = useChainId()
+  const { switchChain } = useSwitchChain()
+  const isWrongChain = chainId !== base.id
 
   // Write contract hooks - we'll use these imperatively
   const { writeContractAsync } = useWriteContract()
@@ -55,12 +62,18 @@ export default function SetupPage() {
   // Check for existing vault on allocation select
   const [existingVaultAddress, setExistingVaultAddress] = useState<Address | null>(null)
 
-  // Redirect if not connected
+  // Wait for hydration before checking connection state
+  const [mounted, setMounted] = useState(false)
   useEffect(() => {
-    if (!isConnected) {
+    setMounted(true)
+  }, [])
+
+  // Redirect if not connected (only after mount to avoid hydration mismatch)
+  useEffect(() => {
+    if (mounted && !isConnected) {
       router.push('/')
     }
-  }, [isConnected, router])
+  }, [mounted, isConnected, router])
 
   // ============================================
   // CHAIN-VERIFIED TRANSACTION ORCHESTRATION
@@ -72,6 +85,36 @@ export default function SetupPage() {
 
     const allocation = selectedAllocation.id
     let currentVaultAddress = existingVaultAddress
+
+    console.log('=== ORCHESTRATION START ===')
+    console.log('Address:', address)
+    console.log('Chain ID:', chainId, '(expected:', base.id, ')')
+    console.log('Allocation:', allocation)
+    console.log('Deposit amount (wei):', depositAmountWei.toString())
+    console.log('Existing vault:', existingVaultAddress)
+
+    // Always force switch to Base - wagmi state may be stale
+    console.log('Ensuring wallet is on Base network...')
+    try {
+      await switchChain({ chainId: base.id })
+      console.log('Chain switch completed or already on Base')
+      // Wait for the switch to propagate
+      await new Promise(r => setTimeout(r, 500))
+    } catch (switchError) {
+      // If user rejects or switch fails, abort
+      console.error('Failed to switch/confirm chain:', switchError)
+      setTxState(prev => ({
+        ...prev,
+        subState: 'error',
+        error: {
+          title: 'Wrong Network',
+          message: 'Please switch to Base network in your wallet.',
+          action: 'Approve the network switch and try again.',
+        },
+      }))
+      orchestratingRef.current = false
+      return
+    }
 
     try {
       // ============================================
@@ -102,14 +145,22 @@ export default function SetupPage() {
           let createHash: Hash
 
           try {
+            console.log('Calling createVault with allocation:', allocation)
+            console.log('Factory address:', CONTRACTS.factory)
+            console.log('Forcing chain ID:', base.id)
             createHash = await writeContractAsync({
               address: CONTRACTS.factory,
               abi: FACTORY_ABI,
               functionName: 'createVault',
               args: [allocation],
+              chainId: base.id, // Force Base chain
             })
+            console.log('createVault tx hash:', createHash)
           } catch (error) {
-            console.error('User rejected or error creating vault:', error)
+            console.error('=== CREATE VAULT ERROR ===')
+            console.error('Error type:', (error as Error)?.name)
+            console.error('Error message:', (error as Error)?.message)
+            console.error('Full error:', error)
             const parsed = parseTransactionError(error)
             setTxState(prev => ({
               ...prev,
@@ -129,50 +180,62 @@ export default function SetupPage() {
           console.log('Waiting for vault creation receipt...')
           setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
 
-          // Extract vault address from event logs
+          // Try to extract vault address from event logs
           const extractedVault = await extractVaultAddressFromReceipt(createHash)
-          if (!extractedVault) {
-            setTxState(prev => ({
-              ...prev,
-              subState: 'error',
-              error: {
-                title: 'Vault Creation Failed',
-                message: 'Could not verify vault was created.',
-                action: 'Please try again.',
-              },
-            }))
-            orchestratingRef.current = false
-            return
-          }
 
-          // Verify vault exists on-chain
-          console.log('Verifying vault on-chain...')
-          const verifiedVault = await verifyVaultExists(address, allocation)
-          if (!verifiedVault || verifiedVault !== extractedVault) {
-            setTxState(prev => ({
-              ...prev,
-              subState: 'error',
-              error: {
-                title: 'Verification Failed',
-                message: 'Could not verify vault exists on chain.',
-                action: 'Please try again.',
-              },
-            }))
-            orchestratingRef.current = false
-            return
-          }
+          // If we extracted from event logs, the vault definitely exists
+          // (the event was emitted in a successful transaction)
+          if (extractedVault) {
+            console.log('Vault address confirmed from event logs:', extractedVault)
+            currentVaultAddress = extractedVault
+          } else {
+            // Receipt extraction failed - fall back to on-chain check with delays
+            console.log('Receipt extraction failed, falling back to on-chain check...')
 
-          currentVaultAddress = verifiedVault
+            // Try with increasing delays to avoid rate limits
+            let fallbackVault: Address | null = null
+            for (const delay of [3000, 8000, 15000]) {
+              console.log(`Waiting ${delay}ms before checking on-chain...`)
+              await new Promise(r => setTimeout(r, delay))
+
+              try {
+                fallbackVault = await verifyVaultExists(address, allocation)
+                if (fallbackVault) {
+                  console.log('Found vault on-chain:', fallbackVault)
+                  break
+                }
+              } catch (rpcError) {
+                console.warn('RPC error during fallback check:', rpcError)
+                // Continue to next retry
+              }
+            }
+
+            if (!fallbackVault) {
+              setTxState(prev => ({
+                ...prev,
+                subState: 'error',
+                error: {
+                  title: 'Vault Creation Pending',
+                  message: 'Transaction submitted but confirmation is taking longer than expected. Check Basescan and try again.',
+                  action: 'Wait a moment and retry.',
+                },
+              }))
+              orchestratingRef.current = false
+              return
+            }
+
+            currentVaultAddress = fallbackVault
+          }
           setTxState(prev => ({
             ...prev,
-            vaultAddress: verifiedVault,
+            vaultAddress: currentVaultAddress,
             vaultVerified: true,
             subState: 'confirmed',
           }))
 
-          console.log('Vault created and verified:', verifiedVault)
-          // Small delay before next step
-          await new Promise(r => setTimeout(r, 500))
+          console.log('Vault created and verified:', currentVaultAddress)
+          // Longer delay to let RPC sync the new contract
+          await new Promise(r => setTimeout(r, 3000))
         }
       }
 
@@ -192,6 +255,85 @@ export default function SetupPage() {
       }
 
       // ============================================
+      // STEP 1.5: ACCEPT OWNERSHIP (if needed)
+      // The vault uses two-step ownership transfer
+      // ============================================
+      console.log('Checking vault ownership...')
+      try {
+        const currentOwner = await publicClient.readContract({
+          address: currentVaultAddress,
+          abi: VAULT_ABI,
+          functionName: 'owner',
+        })
+        console.log('Current vault owner:', currentOwner)
+        console.log('Expected owner:', address)
+
+        if (currentOwner.toLowerCase() !== address.toLowerCase()) {
+          // Check if we're the pending owner
+          const pendingOwner = await publicClient.readContract({
+            address: currentVaultAddress,
+            abi: VAULT_ABI,
+            functionName: 'pendingOwner',
+          })
+          console.log('Pending owner:', pendingOwner)
+
+          if (pendingOwner.toLowerCase() === address.toLowerCase()) {
+            // We need to accept ownership
+            console.log('Accepting vault ownership...')
+            setTxState(prev => ({
+              ...prev,
+              step: 'create_vault',
+              subState: 'awaiting_wallet',
+            }))
+
+            try {
+              const acceptHash = await writeContractAsync({
+                address: currentVaultAddress,
+                abi: VAULT_ABI,
+                functionName: 'acceptOwnership',
+                chainId: base.id,
+              })
+              console.log('acceptOwnership tx hash:', acceptHash)
+
+              setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
+              const acceptSuccess = await waitForReceipt(acceptHash)
+              if (!acceptSuccess) {
+                throw new Error('Accept ownership transaction failed')
+              }
+              console.log('Ownership accepted!')
+            } catch (acceptError) {
+              console.error('Failed to accept ownership:', acceptError)
+              const parsed = parseTransactionError(acceptError)
+              setTxState(prev => ({
+                ...prev,
+                subState: 'error',
+                error: parsed,
+              }))
+              orchestratingRef.current = false
+              return
+            }
+          } else {
+            // Not the pending owner - something is wrong
+            console.error('Not the vault owner or pending owner!')
+            setTxState(prev => ({
+              ...prev,
+              subState: 'error',
+              error: {
+                title: 'Ownership Error',
+                message: 'You are not the owner of this vault.',
+                action: 'Please create a new vault.',
+              },
+            }))
+            orchestratingRef.current = false
+            return
+          }
+        }
+      } catch (ownerError) {
+        console.error('Error checking ownership:', ownerError)
+        // Continue anyway - might work
+      }
+
+      // ============================================
       // STEP 2: APPROVE USDC (if needed)
       // ============================================
 
@@ -208,6 +350,8 @@ export default function SetupPage() {
         }))
 
         console.log('Approving USDC...')
+        console.log('Vault address for approval:', currentVaultAddress)
+        console.log('Amount to approve:', depositAmountWei.toString())
         let approveHash: Hash
 
         try {
@@ -216,9 +360,14 @@ export default function SetupPage() {
             abi: ERC20_ABI,
             functionName: 'approve',
             args: [currentVaultAddress, depositAmountWei],
+            chainId: base.id, // Force Base chain
           })
+          console.log('approve tx hash:', approveHash)
         } catch (error) {
-          console.error('User rejected or error approving:', error)
+          console.error('=== APPROVE ERROR ===')
+          console.error('Error type:', (error as Error)?.name)
+          console.error('Error message:', (error as Error)?.message)
+          console.error('Full error:', error)
           const parsed = parseTransactionError(error)
           setTxState(prev => ({
             ...prev,
@@ -253,9 +402,16 @@ export default function SetupPage() {
           return
         }
 
-        // Verify allowance on-chain
+        // Verify allowance on-chain (with retry for RPC sync delay)
         console.log('Verifying allowance on-chain...')
-        const allowanceVerified = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
+        let allowanceVerified = false
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // Wait for RPC to sync
+          await new Promise(r => setTimeout(r, 2000))
+          allowanceVerified = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
+          if (allowanceVerified) break
+          console.log(`Allowance not yet visible, retry ${attempt + 1}/3...`)
+        }
         if (!allowanceVerified) {
           setTxState(prev => ({
             ...prev,
@@ -298,6 +454,8 @@ export default function SetupPage() {
       }))
 
       console.log('Depositing USDC...')
+      console.log('Vault address for deposit:', currentVaultAddress)
+      console.log('Deposit amount:', depositAmountWei.toString())
       let depositHash: Hash
 
       try {
@@ -306,9 +464,14 @@ export default function SetupPage() {
           abi: VAULT_ABI,
           functionName: 'depositUSDC',
           args: [depositAmountWei],
+          chainId: base.id, // Force Base chain
         })
+        console.log('depositUSDC tx hash:', depositHash)
       } catch (error) {
-        console.error('User rejected or error depositing:', error)
+        console.error('=== DEPOSIT ERROR ===')
+        console.error('Error type:', (error as Error)?.name)
+        console.error('Error message:', (error as Error)?.message)
+        console.error('Full error:', error)
         const parsed = parseTransactionError(error)
         setTxState(prev => ({
           ...prev,
@@ -392,7 +555,7 @@ export default function SetupPage() {
     } finally {
       orchestratingRef.current = false
     }
-  }, [address, selectedAllocation, existingVaultAddress, depositAmountWei, writeContractAsync, router])
+  }, [address, selectedAllocation, existingVaultAddress, depositAmountWei, writeContractAsync, router, chainId, switchChain])
 
   // ============================================
   // UI HANDLERS
@@ -471,7 +634,8 @@ export default function SetupPage() {
     setSetupStep('review')
   }
 
-  if (!isConnected) return null
+  // Don't render until mounted to avoid hydration mismatch
+  if (!mounted || !isConnected) return null
 
   // ============================================
   // RENDER: Allocation Selection
@@ -654,10 +818,25 @@ export default function SetupPage() {
                 : 'You will create your vault, approve USDC spending, then confirm the deposit. Each step requires wallet confirmation.'}
             </p>
           </Card>
+
+          {isWrongChain && (
+            <Card variant="default" className="bg-orange-500/10 border border-orange-500/20">
+              <p className="text-sm text-orange-400 mb-3">
+                Please switch to Base network to continue.
+              </p>
+              <Button
+                size="default"
+                variant="secondary"
+                onClick={() => switchChain({ chainId: base.id })}
+              >
+                Switch to Base
+              </Button>
+            </Card>
+          )}
         </div>
 
         <div className="mt-8 space-y-3">
-          <Button size="large" onClick={handleConfirm} disabled={!factoryConfigured}>
+          <Button size="large" onClick={handleConfirm} disabled={!factoryConfigured || isWrongChain}>
             {existingVaultAddress ? 'Deposit' : 'Create Vault & Deposit'}
           </Button>
         </div>
@@ -700,6 +879,13 @@ export default function SetupPage() {
         {/* Error action */}
         {isError && txState.error?.action && (
           <p className="text-sm text-[var(--muted)] mt-4">{txState.error.action}</p>
+        )}
+
+        {/* Show raw error in development */}
+        {isError && process.env.NODE_ENV === 'development' && (
+          <p className="text-xs text-red-400 mt-4 max-w-xs break-all">
+            Check browser console for details
+          </p>
         )}
 
         {/* Progress steps - only show when not in error or complete */}

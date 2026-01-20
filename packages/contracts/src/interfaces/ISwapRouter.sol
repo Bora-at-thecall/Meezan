@@ -3,7 +3,8 @@ pragma solidity ^0.8.20;
 
 /**
  * @title ISwapRouter
- * @notice Minimal interface for Uniswap V3 SwapRouter exactOutputSingle
+ * @notice Minimal interface for Uniswap V3 SwapRouter02 exactOutputSingle
+ * @dev SwapRouter02 does not include deadline in the struct - use multicall for deadline
  */
 interface ISwapRouter {
     struct ExactOutputSingleParams {
@@ -11,7 +12,6 @@ interface ISwapRouter {
         address tokenOut;
         uint24 fee;
         address recipient;
-        uint256 deadline;
         uint256 amountOut;
         uint256 amountInMaximum;
         uint160 sqrtPriceLimitX96;

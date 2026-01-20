@@ -4,30 +4,58 @@ import { Suspense, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
-import { Button } from '@/components/Button'
-import { Card } from '@/components/Card'
 import { useVaultState, useRebalance } from '@/lib/hooks'
 import { getUserVaults } from '@/lib/store'
 import { parseError } from '@/lib/errors'
 
 type RebalanceState = 'idle' | 'confirming' | 'pending' | 'success' | 'error'
 
+function formatUsd(value: number): string {
+  if (value === 0) return '$0'
+  if (value < 0.01) return '<$0.01'
+  if (value >= 1000) {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value)
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+}
+
+function formatBtc(satoshis: bigint): string {
+  const btc = Number(formatUnits(satoshis, 8))
+  if (btc === 0) return '0'
+  if (btc < 0.0001) return '<0.0001'
+  return btc.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 8 })
+}
+
 function DetailsContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { address, isConnected } = useAccount()
-  const [showTechnical, setShowTechnical] = useState(false)
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
   const [rebalanceState, setRebalanceState] = useState<RebalanceState>('idle')
   const [rebalanceError, setRebalanceError] = useState<{ title: string; message: string } | null>(null)
+  const [mounted, setMounted] = useState(false)
 
-  const { holdings, values, allocations, drift, allocation } = useVaultState(vaultAddress)
+  const { holdings, values, allocations, drift, allocation, isLoading, refetch } = useVaultState(vaultAddress)
   const { rebalance, isPending, isConfirming, isSuccess, error: rawRebalanceError } = useRebalance(vaultAddress)
 
   const DRIFT_THRESHOLD = 5
 
   useEffect(() => {
-    if (!address) return
+    setMounted(true)
+  }, [])
+
+  useEffect(() => {
+    if (!mounted || !address) return
 
     const vaultParam = searchParams.get('vault')
     if (vaultParam) {
@@ -39,22 +67,23 @@ function DetailsContent() {
     if (userVaults.length > 0) {
       setVaultAddress(userVaults[0].address)
     }
-  }, [address, searchParams])
+  }, [mounted, address, searchParams])
 
   useEffect(() => {
-    if (!isConnected) {
+    if (mounted && !isConnected) {
       router.push('/')
     }
-  }, [isConnected, router])
+  }, [mounted, isConnected, router])
 
-  // Track rebalance state
   useEffect(() => {
     if (isPending) setRebalanceState('confirming')
     else if (isConfirming) setRebalanceState('pending')
-    else if (isSuccess) setRebalanceState('success')
-  }, [isPending, isConfirming, isSuccess])
+    else if (isSuccess) {
+      setRebalanceState('success')
+      setTimeout(() => refetch(), 2000)
+    }
+  }, [isPending, isConfirming, isSuccess, refetch])
 
-  // Handle rebalance errors
   useEffect(() => {
     if (rawRebalanceError) {
       const parsed = parseError(rawRebalanceError)
@@ -63,16 +92,13 @@ function DetailsContent() {
     }
   }, [rawRebalanceError])
 
-  // Reset after success
   useEffect(() => {
     if (isSuccess) {
-      setTimeout(() => {
-        setRebalanceState('idle')
-      }, 3000)
+      setTimeout(() => setRebalanceState('idle'), 3000)
     }
   }, [isSuccess])
 
-  if (!isConnected) return null
+  if (!mounted || !isConnected) return null
 
   const handleRebalance = () => {
     setRebalanceError(null)
@@ -85,196 +111,145 @@ function DetailsContent() {
     setRebalanceState('idle')
   }
 
-  const isRebalancing = rebalanceState === 'confirming' || rebalanceState === 'pending'
-
-  const btcBalance = holdings.btc ? formatUnits(holdings.btc, 8) : '0'
-  const usdcBalance = holdings.usdc ? formatUnits(holdings.usdc, 6) : '0'
-
   const canRebalance = drift >= DRIFT_THRESHOLD
+  const hasBalance = values.total > 0
+
+  // Transaction states - minimal
+  if (rebalanceState === 'success') {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">Allocation restored</p>
+        <p className="text-sm text-[var(--muted)]">Back to {allocation?.name || 'target'}</p>
+      </div>
+    )
+  }
+
+  if (rebalanceState === 'error' && rebalanceError) {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">{rebalanceError.title}</p>
+        <p className="text-sm text-[var(--muted)] mb-8">{rebalanceError.message}</p>
+        <button
+          onClick={dismissError}
+          className="text-[var(--primary)] text-sm"
+        >
+          Dismiss
+        </button>
+      </div>
+    )
+  }
+
+  if (rebalanceState === 'confirming' || rebalanceState === 'pending') {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
+        <p className="text-lg mb-2">
+          {rebalanceState === 'confirming' ? 'Confirm in wallet' : 'Rebalancing'}
+        </p>
+        <p className="text-sm text-[var(--muted)]">
+          {rebalanceState === 'confirming' ? 'Approve the transaction' : 'Adjusting allocation'}
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col min-h-[85vh]">
+      {/* Back link */}
       <button
         onClick={() => router.push('/portfolio')}
-        className="text-[var(--primary)] text-sm mb-8 text-left hover:opacity-70 font-medium"
+        className="text-[var(--muted)] text-sm mb-12 text-left hover:text-[var(--foreground)]"
       >
-        ← Back
+        Back
       </button>
 
-      <h1 className="text-3xl font-semibold mb-8">Details</h1>
+      {/* Allocation state */}
+      <div className="mb-12">
+        <p className="text-sm text-[var(--muted)] mb-1">Target allocation</p>
+        <p className="text-2xl font-light">{allocation?.name || '—'}</p>
+      </div>
 
-      {/* Holdings */}
-      <section className="mb-8">
-        <h2 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4">Holdings</h2>
-
-        <div className="space-y-3">
-          <Card variant="elevated" padding="default">
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-orange-500/20 flex items-center justify-center">
-                  <span className="text-orange-400 font-semibold text-sm">BTC</span>
-                </div>
-                <div>
-                  <div className="font-semibold">BTC</div>
-                  <div className="text-sm text-[var(--muted)]">
-                    {parseFloat(btcBalance).toFixed(6)} BTC
-                  </div>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="font-semibold">
-                  ${values.btc.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                </div>
-                <div className="text-sm text-[var(--muted)]">
-                  {allocations.current.btc.toFixed(1)}%
-                  <span className="text-[var(--foreground-secondary)]"> / {allocations.target.btc.toFixed(0)}%</span>
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <Card variant="elevated" padding="default">
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center">
-                  <span className="text-blue-400 font-semibold text-sm">USD</span>
-                </div>
-                <div>
-                  <div className="font-semibold">USDC</div>
-                  <div className="text-sm text-[var(--muted)]">
-                    {parseFloat(usdcBalance).toLocaleString()} USDC
-                  </div>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="font-semibold">
-                  ${values.usdc.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                </div>
-                <div className="text-sm text-[var(--muted)]">
-                  {allocations.current.usdc.toFixed(1)}%
-                  <span className="text-[var(--foreground-secondary)]"> / {allocations.target.usdc.toFixed(0)}%</span>
-                </div>
-              </div>
-            </div>
-          </Card>
-        </div>
-      </section>
-
-      {/* Rebalancing */}
-      <section className="mb-8">
-        <h2 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4">Rebalancing</h2>
-
-        <Card variant="default" padding="default" className="mb-4">
-          <div className="flex justify-between items-center mb-3">
-            <span className="text-[var(--muted)]">Current drift</span>
-            <span className={`font-semibold ${canRebalance ? 'text-[var(--error)]' : ''}`}>
-              {drift.toFixed(2)}%
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-[var(--muted)]">Threshold</span>
-            <span>{DRIFT_THRESHOLD}%</span>
-          </div>
-
-          {/* Progress bar */}
-          <div className="mt-4 h-2 rounded-full overflow-hidden bg-[var(--border)]">
-            <div
-              className={`h-full transition-all duration-500 ${canRebalance ? 'bg-[var(--error)]' : 'bg-[var(--primary)]'}`}
-              style={{ width: `${Math.min((drift / DRIFT_THRESHOLD) * 100, 100)}%` }}
-            />
-          </div>
-        </Card>
-
-        {/* Rebalance error display */}
-        {rebalanceError && (
-          <Card variant="default" className="bg-red-500/10 border border-red-500/20 mb-4">
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-sm text-red-400 font-medium">{rebalanceError.title}</p>
-                <p className="text-xs text-red-400/70 mt-1">{rebalanceError.message}</p>
-              </div>
-              <button onClick={dismissError} className="text-red-400 hover:text-red-300">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-          </Card>
+      {/* Drift - the key metric */}
+      <div className="mb-12">
+        <p className="text-sm text-[var(--muted)] mb-1">Current drift</p>
+        <p className={`text-2xl font-light ${drift < DRIFT_THRESHOLD ? 'text-[var(--foreground)]' : 'text-[var(--warning)]'}`}>
+          {isLoading ? '—' : `${drift.toFixed(1)}%`}
+        </p>
+        {!isLoading && drift < DRIFT_THRESHOLD && (
+          <p className="text-sm text-[var(--muted)] mt-2">Within tolerance</p>
         )}
+      </div>
 
-        {/* Rebalance success display */}
-        {rebalanceState === 'success' && (
-          <Card variant="default" className="bg-green-500/10 border border-green-500/20 mb-4">
-            <p className="text-sm text-green-400 font-medium text-center">Rebalance complete</p>
-          </Card>
-        )}
+      {/* Holdings breakdown - balance sheet style */}
+      <div className="flex-1">
+        <p className="text-sm text-[var(--muted)] mb-4">Holdings</p>
 
-        <Button
-          size="large"
-          variant={canRebalance ? 'primary' : 'secondary'}
-          onClick={handleRebalance}
-          disabled={!canRebalance || isRebalancing}
-        >
-          {rebalanceState === 'confirming' ? 'Confirm in wallet...' :
-           rebalanceState === 'pending' ? 'Processing...' : 'Rebalance'}
-        </Button>
-        {!canRebalance && (
-          <p className="text-xs text-[var(--muted)] text-center mt-3">
-            Drift must exceed {DRIFT_THRESHOLD}% to rebalance
-          </p>
-        )}
-      </section>
-
-      {/* Technical Details */}
-      <section>
-        <button
-          onClick={() => setShowTechnical(!showTechnical)}
-          className="flex justify-between items-center w-full text-xs font-semibold text-[var(--muted)] uppercase tracking-wider mb-4"
-        >
-          <span>Technical</span>
-          <svg
-            className={`w-4 h-4 transition-transform ${showTechnical ? 'rotate-180' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
-        </button>
-
-        {showTechnical && (
-          <Card variant="default" padding="default" className="space-y-3 text-sm">
-            <div className="flex justify-between">
-              <span className="text-[var(--muted)]">Allocation</span>
-              <span className="font-medium">{allocation?.name ?? '-'}</span>
+        <div className="space-y-6">
+          {/* Bitcoin */}
+          <div className="border-b border-[var(--border)] pb-4">
+            <div className="flex justify-between items-baseline mb-2">
+              <span>Bitcoin</span>
+              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.btc)}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--muted)]">Vault</span>
-              <span className="font-mono text-xs">
-                {vaultAddress ? `${vaultAddress.slice(0, 8)}...${vaultAddress.slice(-6)}` : '-'}
+            <div className="flex justify-between text-sm text-[var(--muted)]">
+              <span>{isLoading ? '—' : formatBtc(holdings.btc)} BTC</span>
+              <span>
+                {isLoading ? '—' : `${allocations.current.btc.toFixed(1)}%`}
+                {hasBalance && !isLoading && (
+                  <span className="opacity-50"> / {allocations.target.btc.toFixed(0)}%</span>
+                )}
               </span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--muted)]">Slippage cap</span>
-              <span>1%</span>
+          </div>
+
+          {/* USDC */}
+          <div className="border-b border-[var(--border)] pb-4">
+            <div className="flex justify-between items-baseline mb-2">
+              <span>USDC</span>
+              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.usdc)}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-[var(--muted)]">Network</span>
-              <span>Base</span>
+            <div className="flex justify-between text-sm text-[var(--muted)]">
+              <span>{isLoading ? '—' : `${Number(formatUnits(holdings.usdc, 6)).toFixed(2)}`} USDC</span>
+              <span>
+                {isLoading ? '—' : `${allocations.current.usdc.toFixed(1)}%`}
+                {hasBalance && !isLoading && (
+                  <span className="opacity-50"> / {allocations.target.usdc.toFixed(0)}%</span>
+                )}
+              </span>
             </div>
-            {vaultAddress && (
-              <a
-                href={`https://basescan.org/address/${vaultAddress}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block text-center text-[var(--primary)] hover:underline pt-2"
-              >
-                View on Basescan →
-              </a>
-            )}
-          </Card>
-        )}
-      </section>
+          </div>
+
+          {/* Total */}
+          <div className="flex justify-between items-baseline">
+            <span className="text-[var(--muted)]">Total</span>
+            <span className="text-xl tabular-nums">{isLoading ? '—' : formatUsd(values.total)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Rebalance action - available when needed */}
+      {hasBalance && (
+        <div className="pt-8 border-t border-[var(--border)] mt-8">
+          {canRebalance ? (
+            <button
+              onClick={handleRebalance}
+              className="w-full text-center py-3 text-[var(--primary)]"
+            >
+              Restore to {allocation?.name || 'target'}
+            </button>
+          ) : (
+            <p className="text-center text-sm text-[var(--muted)]">
+              Rebalance available above 5% drift
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Vault address - institutional detail */}
+      {vaultAddress && (
+        <p className="text-xs text-[var(--muted)] text-center mt-8 opacity-50">
+          {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
+        </p>
+      )}
     </div>
   )
 }
@@ -282,8 +257,8 @@ function DetailsContent() {
 export default function DetailsPage() {
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center min-h-[85vh]">
-        <div className="w-8 h-8 rounded-full border-3 border-[var(--border)] border-t-[var(--primary)] animate-spin" />
+      <div className="flex flex-col min-h-[85vh] items-center justify-center">
+        <span className="text-[var(--muted)]">—</span>
       </div>
     }>
       <DetailsContent />

@@ -2,7 +2,7 @@ import { type Address } from 'viem'
 
 // Base mainnet addresses
 export const CONTRACTS = {
-  factory: '0x9FfD7a7dd2C730f1E85643868B645778feDF4f8b' as Address,
+  factory: '0x9e3B4B3bF1A018f488D0b3a302F5b37CDB51c8Eb' as Address,
   usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,
   wbtc: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf' as Address, // cbBTC on Base
   btcUsdFeed: '0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D' as Address,

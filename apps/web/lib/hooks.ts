@@ -1,8 +1,12 @@
 'use client'
 
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt, useAccount } from 'wagmi'
+import { useReadContract, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContracts } from 'wagmi'
 import { parseUnits, formatUnits, type Address } from 'viem'
-import { CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI, ALLOCATION_PRESETS } from './contracts'
+import { useCallback, useState, useEffect } from 'react'
+import { CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI, ALLOCATION_PRESETS, PRICE_FEED_ABI } from './contracts'
+
+// Polling interval for live price updates (15 seconds)
+const POLL_INTERVAL = 15_000
 
 // Hook to check if user has a vault for a specific allocation
 export function useUserVault(allocation: number) {
@@ -53,29 +57,40 @@ export function useCreateVault() {
   }
 }
 
-// Hook to read vault state
+// Hook to read vault state with live updates
 export function useVaultState(vaultAddress: Address | null) {
   const enabled = !!vaultAddress
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  const { data: holdings } = useReadContract({
+  // Read all vault data in parallel
+  const { data: holdings, refetch: refetchHoldings, isLoading: holdingsLoading } = useReadContract({
     address: vaultAddress!,
     abi: VAULT_ABI,
     functionName: 'holdings',
-    query: { enabled },
+    query: {
+      enabled,
+      refetchInterval: POLL_INTERVAL,
+    },
   })
 
-  const { data: usdValues } = useReadContract({
+  const { data: usdValues, refetch: refetchUsdValues, isLoading: usdValuesLoading } = useReadContract({
     address: vaultAddress!,
     abi: VAULT_ABI,
     functionName: 'getUsdValues',
-    query: { enabled },
+    query: {
+      enabled,
+      refetchInterval: POLL_INTERVAL,
+    },
   })
 
-  const { data: currentAllocations } = useReadContract({
+  const { data: currentAllocations, refetch: refetchAllocations } = useReadContract({
     address: vaultAddress!,
     abi: VAULT_ABI,
     functionName: 'currentAllocationsBps',
-    query: { enabled },
+    query: {
+      enabled,
+      refetchInterval: POLL_INTERVAL,
+    },
   })
 
   const { data: targetAllocations } = useReadContract({
@@ -85,11 +100,14 @@ export function useVaultState(vaultAddress: Address | null) {
     query: { enabled },
   })
 
-  const { data: drift } = useReadContract({
+  const { data: drift, refetch: refetchDrift } = useReadContract({
     address: vaultAddress!,
     abi: VAULT_ABI,
     functionName: 'driftBps',
-    query: { enabled },
+    query: {
+      enabled,
+      refetchInterval: POLL_INTERVAL,
+    },
   })
 
   const { data: allocationId } = useReadContract({
@@ -98,6 +116,24 @@ export function useVaultState(vaultAddress: Address | null) {
     functionName: 'allocation',
     query: { enabled },
   })
+
+  // Update lastUpdated when data changes
+  useEffect(() => {
+    if (usdValues) {
+      setLastUpdated(new Date())
+    }
+  }, [usdValues])
+
+  // Unified refetch function
+  const refetch = useCallback(async () => {
+    await Promise.all([
+      refetchHoldings(),
+      refetchUsdValues(),
+      refetchAllocations(),
+      refetchDrift(),
+    ])
+    setLastUpdated(new Date())
+  }, [refetchHoldings, refetchUsdValues, refetchAllocations, refetchDrift])
 
   // Calculate USD values (they come as 18 decimal)
   const btcValueUsd = usdValues ? Number(formatUnits(usdValues[0], 18)) : 0
@@ -118,6 +154,8 @@ export function useVaultState(vaultAddress: Address | null) {
   // Get allocation preset info
   const allocation = allocationId !== undefined ? ALLOCATION_PRESETS[Number(allocationId)] : null
 
+  const isLoading = holdingsLoading || usdValuesLoading
+
   return {
     holdings: {
       btc: holdings ? holdings[0] : BigInt(0),
@@ -134,6 +172,32 @@ export function useVaultState(vaultAddress: Address | null) {
     },
     drift: driftPct,
     allocation,
+    lastUpdated,
+    isLoading,
+    refetch,
+  }
+}
+
+// Hook to get live BTC price from Chainlink
+export function useBtcPrice() {
+  const { data, refetch, isLoading } = useReadContract({
+    address: CONTRACTS.btcUsdFeed,
+    abi: PRICE_FEED_ABI,
+    functionName: 'latestRoundData',
+    query: {
+      refetchInterval: POLL_INTERVAL,
+    },
+  })
+
+  // Price is in 8 decimals
+  const price = data ? Number(formatUnits(BigInt(data[1].toString()), 8)) : 0
+  const updatedAt = data ? new Date(Number(data[3]) * 1000) : null
+
+  return {
+    price,
+    updatedAt,
+    isLoading,
+    refetch,
   }
 }
 

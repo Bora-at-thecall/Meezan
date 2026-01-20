@@ -51,3 +51,17 @@ export function getUserVaults(walletAddress: string): { allocation: number; addr
     address: address as Address,
   }))
 }
+
+// Clear all stored vault data (for reset/debugging)
+export function clearAllVaults() {
+  if (typeof window === 'undefined') return
+  localStorage.removeItem(STORAGE_KEY)
+}
+
+// Expose to window for easy console access
+if (typeof window !== 'undefined') {
+  (window as unknown as { resetMeezan: () => void }).resetMeezan = () => {
+    localStorage.removeItem(STORAGE_KEY)
+    console.log('Meezan vault cache cleared. Refresh the page.')
+  }
+}
