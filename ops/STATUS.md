@@ -271,6 +271,40 @@ All transaction states can transition to error:
 
 ---
 
+## Security Hardening (2026-01-20)
+
+### Documentation
+
+| Document | Status | Location |
+|----------|--------|----------|
+| THREAT_MODEL.md | COMPLETE | `/docs/` |
+| SECURITY_CHECKLIST.md | COMPLETE | `/docs/` |
+| STATIC_ANALYSIS.md | COMPLETE | `/docs/` |
+| AUDIT_PACKAGE/ | COMPLETE | Root directory |
+
+### Contract Security
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Invariant tests added | COMPLETE | 10 security properties |
+| Access control verified | PASS | Owner-only functions protected |
+| Approval safety verified | PASS | Zero approvals after ops |
+| Oracle staleness verified | PASS | Reverts on stale prices |
+| Slippage cap verified | PASS | Never exceeds configured limit |
+| Rebalance gating verified | PASS | Requires drift >= threshold |
+
+### Frontend Security
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Chain allowlist | COMPLETE | Base only (chain ID 8453) |
+| CSP headers | COMPLETE | Added to next.config.ts |
+| Hardcoded addresses | COMPLETE | In lib/security.ts |
+| Basescan links | COMPLETE | ContractVerification component |
+| No dynamic address injection | VERIFIED | Addresses from security.ts only |
+
+---
+
 ## v1 Ready
 
 Meezan v1 is deployed and operational on Base mainnet.

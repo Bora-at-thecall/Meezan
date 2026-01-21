@@ -49,7 +49,7 @@ contract MeezanVaultTest is Test {
         // Exchange rate: 40000e18 means 1 WBTC = 40000 USDC (matches oracle price)
         swapRouter = new MockSwapRouter(40000e18, address(tokenA), address(tokenB));
 
-        // Deploy vault with Split50_50 allocation (50/50)
+        // Deploy vault with 50/50 allocation and default 5% drift threshold
         vault = new MeezanVault(
             address(tokenA),
             address(tokenB),
@@ -57,7 +57,9 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, // 50% BTC
+            5000, // 50% USDC
+            500   // 5% drift threshold (default)
         );
 
         // Mint tokens to owner
@@ -74,6 +76,7 @@ contract MeezanVaultTest is Test {
     // ─────────────────────────────────────────────────────────────────────
 
     function _createVault(AllocationPreset preset) internal returns (MeezanVault) {
+        (uint16 pctA, uint16 pctB) = getTargetAllocations(preset);
         return new MeezanVault(
             address(tokenA),
             address(tokenB),
@@ -81,7 +84,24 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            preset
+            pctA,
+            pctB,
+            500 // Default 5% drift threshold
+        );
+    }
+
+    // Helper to create vault with custom allocation (Advanced mode)
+    function _createCustomVault(uint16 pctA, uint16 pctB, uint16 driftThresholdBps) internal returns (MeezanVault) {
+        return new MeezanVault(
+            address(tokenA),
+            address(tokenB),
+            address(priceFeedA),
+            address(priceFeedB),
+            address(swapRouter),
+            POOL_FEE,
+            pctA,
+            pctB,
+            driftThresholdBps
         );
     }
 
@@ -160,19 +180,17 @@ contract MeezanVaultTest is Test {
     }
 
     function test_AllocationSetCorrectly() public view {
-        assertEq(uint8(vault.allocation()), uint8(AllocationPreset.Split50_50), "Allocation should be Split50_50");
+        (uint16 pctA, uint16 pctB) = vault.targetAllocations();
+        assertEq(pctA, 5000, "Should be 50% BTC");
+        assertEq(pctB, 5000, "Should be 50% USDC");
     }
 
-    function test_AllocationsMatchPreset() public view {
-        (uint16 pctA, uint16 pctB) = vault.targetAllocations();
-        (uint16 expectedA, uint16 expectedB) = getTargetAllocations(AllocationPreset.Split50_50);
-        assertEq(pctA, expectedA, "Target pct A should match Split50_50 preset");
-        assertEq(pctB, expectedB, "Target pct B should match Split50_50 preset");
+    function test_DriftThresholdSetCorrectly() public view {
+        assertEq(vault.driftThresholdBps(), 500, "Drift threshold should be 500 bps (5%)");
     }
 
     function test_VaultWithSplit10_90() public {
         MeezanVault v = _createVault(AllocationPreset.Split10_90);
-        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split10_90));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 1000);
         assertEq(pctB, 9000);
@@ -180,7 +198,6 @@ contract MeezanVaultTest is Test {
 
     function test_VaultWithSplit25_75() public {
         MeezanVault v = _createVault(AllocationPreset.Split25_75);
-        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split25_75));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 2500);
         assertEq(pctB, 7500);
@@ -188,7 +205,6 @@ contract MeezanVaultTest is Test {
 
     function test_VaultWithSplit75_25() public {
         MeezanVault v = _createVault(AllocationPreset.Split75_25);
-        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split75_25));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 7500);
         assertEq(pctB, 2500);
@@ -196,10 +212,138 @@ contract MeezanVaultTest is Test {
 
     function test_VaultWithSplit90_10() public {
         MeezanVault v = _createVault(AllocationPreset.Split90_10);
-        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split90_10));
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA, 9000);
         assertEq(pctB, 1000);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Advanced Mode: Custom Allocation Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_CustomAllocation60_40() public {
+        MeezanVault v = _createCustomVault(6000, 4000, 500);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 6000, "Should be 60% BTC");
+        assertEq(pctB, 4000, "Should be 40% USDC");
+    }
+
+    function test_CustomAllocation33_67() public {
+        MeezanVault v = _createCustomVault(3300, 6700, 500);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 3300, "Should be 33% BTC");
+        assertEq(pctB, 6700, "Should be 67% USDC");
+    }
+
+    function test_CustomAllocation1_99() public {
+        MeezanVault v = _createCustomVault(100, 9900, 500);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 100, "Should be 1% BTC");
+        assertEq(pctB, 9900, "Should be 99% USDC");
+    }
+
+    function test_CustomAllocation99_1() public {
+        MeezanVault v = _createCustomVault(9900, 100, 500);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 9900, "Should be 99% BTC");
+        assertEq(pctB, 100, "Should be 1% USDC");
+    }
+
+    function test_RevertInvalidAllocationDoesNotSumTo10000() public {
+        vm.expectRevert(MeezanVault.InvalidAllocation.selector);
+        _createCustomVault(5000, 4000, 500); // 9000 != 10000
+    }
+
+    function test_RevertInvalidAllocationOverflow() public {
+        vm.expectRevert(MeezanVault.InvalidAllocation.selector);
+        _createCustomVault(6000, 5000, 500); // 11000 != 10000
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Advanced Mode: Custom Drift Threshold Tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_CustomDriftThreshold2Percent() public {
+        MeezanVault v = _createCustomVault(5000, 5000, 200); // 2% minimum
+        assertEq(v.driftThresholdBps(), 200, "Drift threshold should be 200 bps (2%)");
+    }
+
+    function test_CustomDriftThreshold3Percent() public {
+        MeezanVault v = _createCustomVault(5000, 5000, 300);
+        assertEq(v.driftThresholdBps(), 300, "Drift threshold should be 300 bps (3%)");
+    }
+
+    function test_CustomDriftThreshold10Percent() public {
+        MeezanVault v = _createCustomVault(5000, 5000, 1000);
+        assertEq(v.driftThresholdBps(), 1000, "Drift threshold should be 1000 bps (10%)");
+    }
+
+    function test_CustomDriftThreshold20Percent() public {
+        MeezanVault v = _createCustomVault(5000, 5000, 2000); // 20% maximum
+        assertEq(v.driftThresholdBps(), 2000, "Drift threshold should be 2000 bps (20%)");
+    }
+
+    function test_RevertDriftThresholdBelowMinimum() public {
+        vm.expectRevert(MeezanVault.InvalidDriftThreshold.selector);
+        _createCustomVault(5000, 5000, 199); // Below 2%
+    }
+
+    function test_RevertDriftThresholdAboveMaximum() public {
+        vm.expectRevert(MeezanVault.InvalidDriftThreshold.selector);
+        _createCustomVault(5000, 5000, 2001); // Above 20%
+    }
+
+    function test_DriftThresholdConstants() public view {
+        assertEq(vault.MIN_DRIFT_BPS(), 200, "MIN_DRIFT_BPS should be 200 (2%)");
+        assertEq(vault.MAX_DRIFT_BPS(), 2000, "MAX_DRIFT_BPS should be 2000 (20%)");
+        assertEq(vault.DEFAULT_DRIFT_BPS(), 500, "DEFAULT_DRIFT_BPS should be 500 (5%)");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Advanced Mode: Rebalance with Custom Drift Threshold
+    // ─────────────────────────────────────────────────────────────────────
+
+    function test_RebalanceRevertsIfDriftBelowCustomThreshold() public {
+        // Create vault with 3% drift threshold
+        MeezanVault v = _createCustomVault(5000, 5000, 300);
+
+        // Approve tokens
+        tokenA.approve(address(v), type(uint256).max);
+        tokenB.approve(address(v), type(uint256).max);
+
+        // Create 2.5% drift (below 3% threshold)
+        // 52.5% A / 47.5% B = 250 bps drift
+        v.depositTokenA(0.105e8); // $4,200
+        v.depositTokenB(3_800e6); // $3,800
+        // Total: $8,000
+
+        (uint16 pctA,) = v.currentAllocationsBps();
+        assertEq(pctA, 5250, "Should be 52.5%");
+        assertEq(v.driftBps(), 250, "Should be 250 bps drift");
+
+        vm.expectRevert(MeezanVault.DriftBelowThreshold.selector);
+        v.rebalance();
+    }
+
+    function test_RebalanceSucceedsWithCustomThreshold() public {
+        // Create vault with 2% drift threshold
+        MeezanVault v = _createCustomVault(5000, 5000, 200);
+
+        // Approve tokens
+        tokenA.approve(address(v), type(uint256).max);
+        tokenB.approve(address(v), type(uint256).max);
+
+        // Create 2.5% drift (above 2% threshold)
+        v.depositTokenA(0.105e8); // $4,200
+        v.depositTokenB(3_800e6); // $3,800
+
+        // Fund swap router
+        tokenB.mint(address(swapRouter), 1_000_000e6);
+
+        // Should succeed with 2% threshold
+        v.rebalance();
+
+        assertGt(v.lastRebalanceAt(), 0, "Rebalance should have occurred");
     }
 
     function test_RevertZeroAddressTokenA() public {
@@ -211,7 +355,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -224,7 +368,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -237,7 +381,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -250,7 +394,7 @@ contract MeezanVaultTest is Test {
             address(0),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -263,7 +407,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(0),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -276,7 +420,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             2000, // Invalid fee tier
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -291,7 +435,7 @@ contract MeezanVaultTest is Test {
                 address(priceFeedB),
                 address(swapRouter),
                 validFees[i],
-                AllocationPreset.Split50_50
+                5000, 5000, 500
             );
             assertEq(v.poolFee(), validFees[i], "Pool fee should be set correctly");
         }
@@ -306,7 +450,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -320,7 +464,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -334,7 +478,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -348,7 +492,7 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -362,7 +506,7 @@ contract MeezanVaultTest is Test {
             address(badFeed),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, 5000, 500
         );
     }
 
@@ -811,12 +955,12 @@ contract MeezanVaultTest is Test {
         vault.rebalance();
     }
 
-    function test_RebalanceRevertsIfDriftTooLow() public {
+    function test_RebalanceRevertsIfDriftBelowThreshold() public {
         // 50/50 deposit matches target exactly
         vault.depositTokenA(0.1e8); // $4,000
         vault.depositTokenB(4_000e6); // $4,000
 
-        vm.expectRevert(MeezanVault.DriftTooLow.selector);
+        vm.expectRevert(MeezanVault.DriftBelowThreshold.selector);
         vault.rebalance();
     }
 
@@ -831,7 +975,7 @@ contract MeezanVaultTest is Test {
         assertEq(pctA, 5400, "Should be 54%");
         assertEq(vault.driftBps(), 400, "Should be 400 bps drift");
 
-        vm.expectRevert(MeezanVault.DriftTooLow.selector);
+        vm.expectRevert(MeezanVault.DriftBelowThreshold.selector);
         vault.rebalance();
     }
 
@@ -1105,7 +1249,6 @@ contract MeezanVaultTest is Test {
 
         (uint16 pctA, uint16 pctB) = v.targetAllocations();
         assertEq(pctA + pctB, 10000, "All allocation presets must sum to 10000");
-        assertEq(uint8(v.allocation()), preset, "Allocation preset should be stored correctly");
     }
 
     function testFuzz_WithdrawCannotExceedBalance(uint256 depositAmt, uint256 withdrawAmt) public {
@@ -1274,24 +1417,24 @@ contract MeezanVaultTest is Test {
     }
 
     function test_MinSwapUsdConstant() public view {
-        assertEq(vault.MIN_SWAP_USD(), 10e18, "MIN_SWAP_USD should be $10");
+        assertEq(vault.MIN_SWAP_USD(), 1e18, "MIN_SWAP_USD should be $1");
     }
 
     function test_DepositUSDCSkipsDustSwap() public {
         tokenA.mint(address(swapRouter), 100e8);
 
-        // Deposit small amount that would result in swap below MIN_SWAP_USD ($10)
+        // Deposit small amount that would result in swap below MIN_SWAP_USD ($1)
         // First create a nearly balanced portfolio
         vault.depositTokenA(1e8); // 1 WBTC = $40,000
         vault.depositTokenB(40_000e6); // $40,000 USDC
         // Now portfolio is exactly 50/50
 
-        // Deposit just $15 USDC
-        // Target 50% of ($80,000 + $15) = $40,007.50 in WBTC
+        // Deposit just $1.50 USDC
+        // Target 50% of ($80,000 + $1.50) = $40,000.75 in WBTC
         // Current: $40,000 in WBTC
-        // usdToBuy = $7.50 < MIN_SWAP_USD ($10)
+        // usdToBuy = $0.75 < MIN_SWAP_USD ($1)
         // Should skip swap
-        uint256 smallDeposit = 15e6; // $15 USDC
+        uint256 smallDeposit = 1_500_000; // $1.50 USDC (1.5e6)
 
         vm.expectEmit(true, true, true, true);
         emit MeezanVault.DepositAndAllocated(smallDeposit, 0, 0);
@@ -1301,7 +1444,7 @@ contract MeezanVaultTest is Test {
         // Verify no swap occurred - WBTC balance unchanged
         (uint256 balA, uint256 balB) = vault.holdings();
         assertEq(balA, 1e8, "WBTC should be unchanged");
-        assertEq(balB, 40_015e6, "USDC should be 40,015");
+        assertEq(balB, 40_001_500_000, "USDC should be 40,001.50");
     }
 
     function test_DepositUSDCSwapsWhenAboveMinThreshold() public {
@@ -1430,20 +1573,20 @@ contract MeezanVaultTest is Test {
         // Fund swap router
         tokenB.mint(address(swapRouter), 1_000_000e6);
 
-        // Since drift is too low, it will revert with DriftTooLow
-        vm.expectRevert(MeezanVault.DriftTooLow.selector);
+        // Since drift is too low, it will revert with DriftBelowThreshold
+        vm.expectRevert(MeezanVault.DriftBelowThreshold.selector);
         vault.rebalance();
     }
 
     function test_RebalanceSkipsSwapWhenBelowMinUsd() public {
         // Create portfolio with exactly 500 bps drift but small total value
-        // so the USD to swap is less than $10
-        // At $160 total value, 55/45 = $88 A / $72 B, target = $80 each
-        // Shift needed = $8 which is < $10 MIN_SWAP_USD
+        // so the USD to swap is less than $1 (MIN_SWAP_USD)
+        // At $16 total value, 55/45 = $8.80 A / $7.20 B, target = $8 each
+        // Shift needed = $0.80 which is < $1 MIN_SWAP_USD
 
-        vault.depositTokenA(0.0022e8); // $88
-        vault.depositTokenB(72e6); // $72
-        // Total: $160, 55/45 split
+        vault.depositTokenA(0.00022e8); // $8.80
+        vault.depositTokenB(7_200_000); // $7.20 (7.2e6)
+        // Total: $16, 55/45 split
 
         uint16 drift = vault.driftBps();
         assertEq(drift, 500, "Should be exactly 500 bps drift");
@@ -1454,11 +1597,11 @@ contract MeezanVaultTest is Test {
         // Rebalance should succeed but emit event with 0 amounts (no swap)
         vault.rebalance();
 
-        // Since usdToShift ($8) < MIN_SWAP_USD ($10), no actual swap occurs
+        // Since usdToShift ($0.80) < MIN_SWAP_USD ($1), no actual swap occurs
         // Holdings should be unchanged
         (uint256 balA, uint256 balB) = vault.holdings();
-        assertEq(balA, 0.0022e8, "WBTC should be unchanged");
-        assertEq(balB, 72e6, "USDC should be unchanged");
+        assertEq(balA, 0.00022e8, "WBTC should be unchanged");
+        assertEq(balB, 7_200_000, "USDC should be unchanged");
     }
 
     function test_RebalanceEmitsRebalancedEvent() public {
@@ -1561,7 +1704,9 @@ contract MeezanVaultTest is Test {
             address(priceFeedB),
             address(swapRouter),
             POOL_FEE,
-            AllocationPreset.Split90_10 // 90% WBTC
+            9000, // 90% BTC
+            1000, // 10% USDC
+            500   // 5% drift threshold
         );
 
         // Fund router

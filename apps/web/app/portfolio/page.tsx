@@ -6,7 +6,9 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
 import { Button } from '@/components/Button'
-import { useVaultState, useWithdraw } from '@/lib/hooks'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { SystemStatusCompact } from '@/components/SystemStatus'
+import { useVaultState, useWithdraw, useGasEstimate } from '@/lib/hooks'
 import { getUserVaults, getStoredVault, storeVault } from '@/lib/store'
 import { parseError } from '@/lib/errors'
 import { verifyVaultExists } from '@/lib/tx-orchestrator'
@@ -47,10 +49,12 @@ function PortfolioContent() {
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
   const [withdrawState, setWithdrawState] = useState<WithdrawState>('idle')
   const [withdrawError, setWithdrawError] = useState<{ title: string; message: string } | null>(null)
+  const [showWithdrawConfirm, setShowWithdrawConfirm] = useState(false)
   const [mounted, setMounted] = useState(false)
 
-  const { values, allocation, holdings, drift, lastUpdated, isLoading, refetch } = useVaultState(vaultAddress)
+  const { values, allocationName, holdings, drift, driftThreshold, lastUpdated, isLoading, refetch } = useVaultState(vaultAddress)
   const { withdraw, isPending, isConfirming, isSuccess, error: rawWithdrawError } = useWithdraw(vaultAddress)
+  const { estimateUsd } = useGasEstimate()
 
   useEffect(() => {
     setMounted(true)
@@ -119,7 +123,12 @@ function PortfolioContent() {
 
   if (!mounted || !isConnected) return null
 
-  const handleWithdraw = () => {
+  const handleWithdrawClick = () => {
+    setShowWithdrawConfirm(true)
+  }
+
+  const handleWithdrawConfirm = () => {
+    setShowWithdrawConfirm(false)
     setWithdrawError(null)
     setWithdrawState('confirming')
     withdraw()
@@ -181,86 +190,96 @@ function PortfolioContent() {
   }
 
   const hasBalance = values.total > 0
-  const isOnTrack = drift < 5
-
-  // Time context
-  const timeContext = lastUpdated
-    ? Math.floor((Date.now() - lastUpdated.getTime()) / 1000) < 30
-      ? 'Just now'
-      : lastUpdated.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : null
 
   return (
     <div className="flex flex-col min-h-[85vh]">
-      {/* Balance */}
-      <div className="flex-1 flex flex-col justify-center items-center">
-        <p className="text-[64px] font-extralight tracking-tight mb-6">
+      {/* Balance - the hero */}
+      <div className="flex-1 flex flex-col justify-center items-center py-12">
+        <p className="text-[72px] sm:text-[80px] font-extralight tracking-tight tabular-nums">
           {isLoading ? (
-            <span className="opacity-20">—</span>
+            <span className="opacity-10">—</span>
           ) : (
             formatUsd(values.total)
           )}
         </p>
 
-        {/* System status */}
+        {/* System status - understated */}
         {hasBalance && !isLoading && (
-          <div className="text-center space-y-1">
-            {isOnTrack ? (
-              <p className="text-[var(--muted)] text-sm">
-                Allocation automatically maintained
-              </p>
-            ) : (
-              <p className="text-[var(--warning)] text-sm">
-                {drift.toFixed(1)}% from target
-              </p>
-            )}
-            {timeContext && (
-              <p className="text-[var(--muted)] text-xs opacity-50">
-                {timeContext}
-              </p>
-            )}
+          <div className="mt-8">
+            <SystemStatusCompact
+              drift={drift}
+              driftThreshold={driftThreshold}
+              lastUpdated={lastUpdated}
+              isLoading={isLoading}
+            />
           </div>
         )}
       </div>
 
-      {/* Holdings */}
+      {/* Holdings - balance sheet style */}
       {hasBalance && !isLoading && (
-        <div className="border-t border-[var(--border)] py-8">
-          <div className="flex justify-between items-baseline mb-5">
-            <span className="text-[var(--muted)] text-sm">Bitcoin</span>
-            <span className="tabular-nums">
-              {formatUsd(values.btc)}
-              <span className="text-[var(--muted)] text-xs ml-2">{formatBtc(holdings.btc)}</span>
-            </span>
+        <div className="py-10">
+          {/* Signature divider - the balance motif */}
+          <div className="flex items-center gap-4 mb-8">
+            <div className="flex-1 h-px bg-[var(--border)]" />
+            <span className="text-[10px] text-[var(--muted)] uppercase tracking-[0.2em]">Holdings</span>
+            <div className="flex-1 h-px bg-[var(--border)]" />
           </div>
-          <div className="flex justify-between items-baseline">
-            <span className="text-[var(--muted)] text-sm">USDC</span>
-            <span className="tabular-nums">
-              {formatUsd(values.usdc)}
-              <span className="text-[var(--muted)] text-xs ml-2">{Number(formatUnits(holdings.usdc, 6)).toFixed(2)}</span>
-            </span>
+
+          <div className="space-y-4">
+            <div className="flex justify-between items-baseline">
+              <span className="text-[var(--muted)]">Bitcoin</span>
+              <div className="text-right">
+                <span className="tabular-nums">{formatUsd(values.btc)}</span>
+                <span className="text-[var(--muted)] text-sm ml-3 tabular-nums">{formatBtc(holdings.btc)}</span>
+              </div>
+            </div>
+            <div className="flex justify-between items-baseline">
+              <span className="text-[var(--muted)]">USDC</span>
+              <div className="text-right">
+                <span className="tabular-nums">{formatUsd(values.usdc)}</span>
+                <span className="text-[var(--muted)] text-sm ml-3 tabular-nums">{Number(formatUnits(holdings.usdc, 6)).toFixed(2)}</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Actions */}
-      <div className="border-t border-[var(--border)] py-6">
-        <div className="flex justify-center gap-8 text-sm text-[var(--muted)]">
-          <Link href="/setup" className="hover:text-[var(--foreground)]">
+      {/* Actions - serious, weighty */}
+      <div className="py-8 mt-auto">
+        <div className="flex items-center gap-4 mb-6">
+          <div className="flex-1 h-px bg-[var(--border)]" />
+        </div>
+        <div className="flex justify-center gap-10 text-sm">
+          <Link href="/setup" className="text-[var(--muted)] hover:text-[var(--foreground)] transition-colors">
             Deposit
           </Link>
           {hasBalance && (
             <>
-              <button onClick={handleWithdraw} className="hover:text-[var(--foreground)]">
+              <button onClick={handleWithdrawClick} className="text-[var(--muted)] hover:text-[var(--foreground)] transition-colors">
                 Withdraw
               </button>
-              <Link href={`/details?vault=${vaultAddress}`} className="hover:text-[var(--foreground)]">
+              <Link href={`/details?vault=${vaultAddress}`} className="text-[var(--muted)] hover:text-[var(--foreground)] transition-colors">
                 Details
               </Link>
             </>
           )}
         </div>
       </div>
+
+      {/* Withdraw confirmation dialog */}
+      <ConfirmDialog
+        isOpen={showWithdrawConfirm}
+        onClose={() => setShowWithdrawConfirm(false)}
+        onConfirm={handleWithdrawConfirm}
+        title="Withdraw all funds"
+        description="This withdraws all BTC and USDC to your connected wallet."
+        details={[
+          { label: 'Total value', value: formatUsd(values.total) },
+          { label: 'Network fee', value: estimateUsd(150000) },
+        ]}
+        confirmText="Withdraw"
+      />
     </div>
   )
 }

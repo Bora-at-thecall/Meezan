@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 
 import {MeezanVault} from "../src/MeezanVault.sol";
-import {AllocationPreset} from "../src/AllocationPresets.sol";
 
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 import {MockPriceFeed} from "../test/mocks/MockPriceFeed.sol";
@@ -36,7 +35,7 @@ contract DeployBase is Script {
 
         // 4) Deploy MeezanVault
         // Constructor signature:
-        // (tokenA, tokenB, priceFeedA, priceFeedB, swapRouter, poolFee, allocation)
+        // (tokenA, tokenB, priceFeedA, priceFeedB, swapRouter, poolFee, targetPctA, targetPctB, driftThresholdBps)
         MeezanVault vault = new MeezanVault(
             address(wbtc),
             address(usdc),
@@ -44,7 +43,9 @@ contract DeployBase is Script {
             address(usdcUsd),
             address(router),
             3000,
-            AllocationPreset.Split50_50
+            5000, // 50% BTC
+            5000, // 50% USDC
+            500   // 5% drift threshold
         );
 
         // 5) Mint tokens to deployer (your dev wallet)

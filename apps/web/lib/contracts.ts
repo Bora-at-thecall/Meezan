@@ -1,12 +1,14 @@
 import { type Address } from 'viem'
+import { VERIFIED_CONTRACTS } from './security'
 
-// Base mainnet addresses
+// Re-export verified contracts for backward compatibility
+// IMPORTANT: These addresses are hardcoded in security.ts and must not be dynamically loaded
 export const CONTRACTS = {
-  factory: '0x9e3B4B3bF1A018f488D0b3a302F5b37CDB51c8Eb' as Address,
-  usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,
-  wbtc: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf' as Address, // cbBTC on Base
-  btcUsdFeed: '0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D' as Address,
-  usdcUsdFeed: '0x7e860098F58bBFC8648a4311b374B1D669a2bc6B' as Address,
+  factory: VERIFIED_CONTRACTS.factory,
+  usdc: VERIFIED_CONTRACTS.usdc,
+  wbtc: VERIFIED_CONTRACTS.cbBTC, // cbBTC on Base (alias for backward compat)
+  btcUsdFeed: VERIFIED_CONTRACTS.btcUsdFeed,
+  usdcUsdFeed: VERIFIED_CONTRACTS.usdcUsdFeed,
 }
 
 // Allocation presets matching the contract enum
@@ -23,6 +25,7 @@ export type AllocationPresetType = typeof ALLOCATION_PRESETS[number]
 
 // Factory ABI
 export const FACTORY_ABI = [
+  // Simple mode (presets)
   {
     name: 'createVault',
     type: 'function',
@@ -50,6 +53,31 @@ export const FACTORY_ABI = [
     ],
     outputs: [{ type: 'address' }],
   },
+  // Advanced mode (custom allocations)
+  {
+    name: 'createAdvancedVault',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'pctA', type: 'uint16' },
+      { name: 'pctB', type: 'uint16' },
+      { name: 'driftThresholdBps', type: 'uint16' },
+    ],
+    outputs: [{ name: 'vault', type: 'address' }],
+  },
+  {
+    name: 'getAdvancedVault',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'pctA', type: 'uint16' },
+      { name: 'pctB', type: 'uint16' },
+      { name: 'driftThresholdBps', type: 'uint16' },
+    ],
+    outputs: [{ name: 'vault', type: 'address' }],
+  },
+  // Events
   {
     type: 'event',
     name: 'VaultDeployed',
@@ -57,6 +85,17 @@ export const FACTORY_ABI = [
       { name: 'owner', type: 'address', indexed: true },
       { name: 'vault', type: 'address', indexed: true },
       { name: 'allocation', type: 'uint8', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'AdvancedVaultDeployed',
+    inputs: [
+      { name: 'owner', type: 'address', indexed: true },
+      { name: 'vault', type: 'address', indexed: true },
+      { name: 'pctA', type: 'uint16', indexed: false },
+      { name: 'pctB', type: 'uint16', indexed: false },
+      { name: 'driftThresholdBps', type: 'uint16', indexed: false },
     ],
   },
 ] as const
@@ -126,11 +165,11 @@ export const VAULT_ABI = [
     outputs: [{ type: 'uint16' }],
   },
   {
-    name: 'allocation',
+    name: 'driftThresholdBps',
     type: 'function',
     stateMutability: 'view',
     inputs: [],
-    outputs: [{ type: 'uint8' }],
+    outputs: [{ type: 'uint16' }],
   },
   // Write functions
   {
@@ -163,6 +202,47 @@ export const VAULT_ABI = [
     stateMutability: 'nonpayable',
     inputs: [],
     outputs: [],
+  },
+  // Events for activity log
+  {
+    type: 'event',
+    name: 'Deposit',
+    inputs: [
+      { name: 'owner', type: 'address', indexed: true },
+      { name: 'token', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Withdraw',
+    inputs: [
+      { name: 'owner', type: 'address', indexed: true },
+      { name: 'token', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'DepositAndAllocated',
+    inputs: [
+      { name: 'amountUSDC', type: 'uint256', indexed: false },
+      { name: 'wbtcBought', type: 'uint256', indexed: false },
+      { name: 'usdcSpent', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Rebalanced',
+    inputs: [
+      { name: 'caller', type: 'address', indexed: true },
+      { name: 'sellToken', type: 'address', indexed: true },
+      { name: 'buyToken', type: 'address', indexed: true },
+      { name: 'amountOut', type: 'uint256', indexed: false },
+      { name: 'amountIn', type: 'uint256', indexed: false },
+      { name: 'driftBefore', type: 'uint16', indexed: false },
+      { name: 'driftAfter', type: 'uint16', indexed: false },
+    ],
   },
 ] as const
 

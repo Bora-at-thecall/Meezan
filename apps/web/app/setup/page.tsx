@@ -16,6 +16,7 @@ import {
   getStateMessage,
   extractVaultAddressFromReceipt,
   verifyVaultExists,
+  verifyAdvancedVaultExists,
   verifyAllowance,
   waitForReceipt,
   verifyVaultHasHoldings,
@@ -25,7 +26,17 @@ import {
 import { parseUnits, type Address, type Hash } from 'viem'
 
 // UI step before processing
-type SetupStep = 'allocation' | 'amount' | 'review' | 'processing'
+type SetupStep = 'allocation' | 'explicit-rules' | 'amount' | 'review' | 'processing'
+
+// Threshold presets with trade-off labels
+const THRESHOLD_PRESETS = [
+  { value: 3, label: 'Tight', description: 'Rebalances often, higher fees' },
+  { value: 5, label: 'Standard', description: 'Balanced approach' },
+  { value: 10, label: 'Relaxed', description: 'Rebalances rarely, lower fees' },
+] as const
+
+// Allocation steps for explicit rules (5% increments)
+const ALLOCATION_STEPS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const
 
 export default function SetupPage() {
   const router = useRouter()
@@ -37,11 +48,18 @@ export default function SetupPage() {
   const [amount, setAmount] = useState('')
   const [inputError, setInputError] = useState<string | null>(null)
 
+  // Explicit rules state (custom mode)
+  const [customBtcPct, setCustomBtcPct] = useState(50)
+  const [customThresholdIndex, setCustomThresholdIndex] = useState(1) // Standard by default
+
   // Transaction orchestrator state
   const [txState, setTxState] = useState<OrchestratorState>(INITIAL_STATE)
 
   // Track if we're currently orchestrating to prevent double-execution
   const orchestratingRef = useRef(false)
+
+  // Determine if we're in explicit rules mode
+  const isExplicitRulesMode = setupStep === 'explicit-rules' || (setupStep !== 'allocation' && selectedAllocation === null)
 
   // Amount in wei for contract calls
   const depositAmountWei = amount ? parseUnits(amount, 6) : BigInt(0)
@@ -75,21 +93,30 @@ export default function SetupPage() {
     }
   }, [mounted, isConnected, router])
 
+  // Get current threshold value
+  const currentThreshold = THRESHOLD_PRESETS[customThresholdIndex].value
+
   // ============================================
   // CHAIN-VERIFIED TRANSACTION ORCHESTRATION
   // ============================================
 
   const runOrchestration = useCallback(async () => {
-    if (!address || !selectedAllocation || orchestratingRef.current) return
+    if (!address || orchestratingRef.current) return
+    if (!isExplicitRulesMode && !selectedAllocation) return
     orchestratingRef.current = true
 
-    const allocation = selectedAllocation.id
+    const allocation = selectedAllocation?.id ?? 0
+    const btcBps = isExplicitRulesMode ? customBtcPct * 100 : (selectedAllocation?.btcPct ?? 50) * 100
+    const usdcBps = 10000 - btcBps
+    const driftBps = isExplicitRulesMode ? currentThreshold * 100 : 500 // 5% default for simple mode
     let currentVaultAddress = existingVaultAddress
 
     console.log('=== ORCHESTRATION START ===')
     console.log('Address:', address)
     console.log('Chain ID:', chainId, '(expected:', base.id, ')')
-    console.log('Allocation:', allocation)
+    console.log('Mode:', isExplicitRulesMode ? 'Explicit Rules' : 'Preset')
+    console.log('Allocation:', isExplicitRulesMode ? `${customBtcPct}/${100 - customBtcPct} (BPS: ${btcBps}/${usdcBps})` : allocation)
+    console.log('Drift threshold:', driftBps, 'bps')
     console.log('Deposit amount (wei):', depositAmountWei.toString())
     console.log('Existing vault:', existingVaultAddress)
 
@@ -98,10 +125,8 @@ export default function SetupPage() {
     try {
       await switchChain({ chainId: base.id })
       console.log('Chain switch completed or already on Base')
-      // Wait for the switch to propagate
       await new Promise(r => setTimeout(r, 500))
     } catch (switchError) {
-      // If user rejects or switch fails, abort
       console.error('Failed to switch/confirm chain:', switchError)
       setTxState(prev => ({
         ...prev,
@@ -121,9 +146,13 @@ export default function SetupPage() {
       // STEP 1: CREATE VAULT (if needed)
       // ============================================
       if (!currentVaultAddress) {
-        // Check if vault already exists on-chain (in case of page refresh)
         console.log('Checking if vault already exists...')
-        const existingVault = await verifyVaultExists(address, allocation)
+        let existingVault: Address | null = null
+        if (isExplicitRulesMode) {
+          existingVault = await verifyAdvancedVaultExists(address, btcBps, usdcBps, driftBps)
+        } else {
+          existingVault = await verifyVaultExists(address, allocation)
+        }
         if (existingVault) {
           console.log('Found existing vault on-chain:', existingVault)
           currentVaultAddress = existingVault
@@ -133,7 +162,6 @@ export default function SetupPage() {
             vaultVerified: true,
           }))
         } else {
-          // Need to create vault
           setTxState(prev => ({
             ...prev,
             step: 'create_vault',
@@ -145,68 +173,63 @@ export default function SetupPage() {
           let createHash: Hash
 
           try {
-            console.log('Calling createVault with allocation:', allocation)
-            console.log('Factory address:', CONTRACTS.factory)
-            console.log('Forcing chain ID:', base.id)
-            createHash = await writeContractAsync({
-              address: CONTRACTS.factory,
-              abi: FACTORY_ABI,
-              functionName: 'createVault',
-              args: [allocation],
-              chainId: base.id, // Force Base chain
-            })
+            if (isExplicitRulesMode) {
+              console.log('Calling createAdvancedVault with:', btcBps, usdcBps, driftBps)
+              createHash = await writeContractAsync({
+                address: CONTRACTS.factory,
+                abi: FACTORY_ABI,
+                functionName: 'createAdvancedVault',
+                args: [btcBps, usdcBps, driftBps],
+                chainId: base.id,
+              })
+            } else {
+              console.log('Calling createVault with allocation:', allocation)
+              createHash = await writeContractAsync({
+                address: CONTRACTS.factory,
+                abi: FACTORY_ABI,
+                functionName: 'createVault',
+                args: [allocation],
+                chainId: base.id,
+              })
+            }
             console.log('createVault tx hash:', createHash)
           } catch (error) {
-            console.error('=== CREATE VAULT ERROR ===')
-            console.error('Error type:', (error as Error)?.name)
-            console.error('Error message:', (error as Error)?.message)
-            console.error('Full error:', error)
+            console.error('=== CREATE VAULT ERROR ===', error)
             const parsed = parseTransactionError(error)
-            setTxState(prev => ({
-              ...prev,
-              subState: 'error',
-              error: parsed,
-            }))
+            setTxState(prev => ({ ...prev, subState: 'error', error: parsed }))
             orchestratingRef.current = false
             return
           }
 
-          setTxState(prev => ({
-            ...prev,
-            subState: 'tx_submitted',
-            txHash: createHash,
-          }))
+          setTxState(prev => ({ ...prev, subState: 'tx_submitted', txHash: createHash }))
 
           console.log('Waiting for vault creation receipt...')
           setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
 
-          // Try to extract vault address from event logs
           const extractedVault = await extractVaultAddressFromReceipt(createHash)
 
-          // If we extracted from event logs, the vault definitely exists
-          // (the event was emitted in a successful transaction)
           if (extractedVault) {
             console.log('Vault address confirmed from event logs:', extractedVault)
             currentVaultAddress = extractedVault
           } else {
-            // Receipt extraction failed - fall back to on-chain check with delays
             console.log('Receipt extraction failed, falling back to on-chain check...')
-
-            // Try with increasing delays to avoid rate limits
             let fallbackVault: Address | null = null
             for (const delay of [3000, 8000, 15000]) {
               console.log(`Waiting ${delay}ms before checking on-chain...`)
               await new Promise(r => setTimeout(r, delay))
 
               try {
-                fallbackVault = await verifyVaultExists(address, allocation)
+                if (isExplicitRulesMode) {
+                  fallbackVault = await verifyAdvancedVaultExists(address, btcBps, usdcBps, driftBps)
+                } else {
+                  fallbackVault = await verifyVaultExists(address, allocation)
+                }
                 if (fallbackVault) {
                   console.log('Found vault on-chain:', fallbackVault)
                   break
                 }
               } catch (rpcError) {
                 console.warn('RPC error during fallback check:', rpcError)
-                // Continue to next retry
               }
             }
 
@@ -216,7 +239,7 @@ export default function SetupPage() {
                 subState: 'error',
                 error: {
                   title: 'Vault Creation Pending',
-                  message: 'Transaction submitted but confirmation is taking longer than expected. Check Basescan and try again.',
+                  message: 'Transaction submitted but confirmation is taking longer than expected.',
                   action: 'Wait a moment and retry.',
                 },
               }))
@@ -234,21 +257,15 @@ export default function SetupPage() {
           }))
 
           console.log('Vault created and verified:', currentVaultAddress)
-          // Longer delay to let RPC sync the new contract
           await new Promise(r => setTimeout(r, 3000))
         }
       }
 
-      // At this point we must have a vault address
       if (!currentVaultAddress) {
         setTxState(prev => ({
           ...prev,
           subState: 'error',
-          error: {
-            title: 'No Vault',
-            message: 'Vault address not available.',
-            action: 'Please try again.',
-          },
+          error: { title: 'No Vault', message: 'Vault address not available.', action: 'Please try again.' },
         }))
         orchestratingRef.current = false
         return
@@ -256,7 +273,6 @@ export default function SetupPage() {
 
       // ============================================
       // STEP 1.5: ACCEPT OWNERSHIP (if needed)
-      // The vault uses two-step ownership transfer
       // ============================================
       console.log('Checking vault ownership...')
       try {
@@ -265,26 +281,17 @@ export default function SetupPage() {
           abi: VAULT_ABI,
           functionName: 'owner',
         })
-        console.log('Current vault owner:', currentOwner)
-        console.log('Expected owner:', address)
 
         if (currentOwner.toLowerCase() !== address.toLowerCase()) {
-          // Check if we're the pending owner
           const pendingOwner = await publicClient.readContract({
             address: currentVaultAddress,
             abi: VAULT_ABI,
             functionName: 'pendingOwner',
           })
-          console.log('Pending owner:', pendingOwner)
 
           if (pendingOwner.toLowerCase() === address.toLowerCase()) {
-            // We need to accept ownership
             console.log('Accepting vault ownership...')
-            setTxState(prev => ({
-              ...prev,
-              step: 'create_vault',
-              subState: 'awaiting_wallet',
-            }))
+            setTxState(prev => ({ ...prev, step: 'create_vault', subState: 'awaiting_wallet' }))
 
             try {
               const acceptHash = await writeContractAsync({
@@ -293,36 +300,23 @@ export default function SetupPage() {
                 functionName: 'acceptOwnership',
                 chainId: base.id,
               })
-              console.log('acceptOwnership tx hash:', acceptHash)
 
               setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
               const acceptSuccess = await waitForReceipt(acceptHash)
-              if (!acceptSuccess) {
-                throw new Error('Accept ownership transaction failed')
-              }
+              if (!acceptSuccess) throw new Error('Accept ownership transaction failed')
               console.log('Ownership accepted!')
             } catch (acceptError) {
               console.error('Failed to accept ownership:', acceptError)
               const parsed = parseTransactionError(acceptError)
-              setTxState(prev => ({
-                ...prev,
-                subState: 'error',
-                error: parsed,
-              }))
+              setTxState(prev => ({ ...prev, subState: 'error', error: parsed }))
               orchestratingRef.current = false
               return
             }
           } else {
-            // Not the pending owner - something is wrong
-            console.error('Not the vault owner or pending owner!')
             setTxState(prev => ({
               ...prev,
               subState: 'error',
-              error: {
-                title: 'Ownership Error',
-                message: 'You are not the owner of this vault.',
-                action: 'Please create a new vault.',
-              },
+              error: { title: 'Ownership Error', message: 'You are not the owner of this vault.', action: 'Please create a new vault.' },
             }))
             orchestratingRef.current = false
             return
@@ -330,28 +324,18 @@ export default function SetupPage() {
         }
       } catch (ownerError) {
         console.error('Error checking ownership:', ownerError)
-        // Continue anyway - might work
       }
 
       // ============================================
       // STEP 2: APPROVE USDC (if needed)
       // ============================================
-
-      // Check current allowance on-chain
       console.log('Checking USDC allowance...')
       const hasAllowance = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
 
       if (!hasAllowance) {
-        setTxState(prev => ({
-          ...prev,
-          step: 'approve_usdc',
-          subState: 'awaiting_wallet',
-          error: null,
-        }))
+        setTxState(prev => ({ ...prev, step: 'approve_usdc', subState: 'awaiting_wallet', error: null }))
 
         console.log('Approving USDC...')
-        console.log('Vault address for approval:', currentVaultAddress)
-        console.log('Amount to approve:', depositAmountWei.toString())
         let approveHash: Hash
 
         try {
@@ -360,102 +344,59 @@ export default function SetupPage() {
             abi: ERC20_ABI,
             functionName: 'approve',
             args: [currentVaultAddress, depositAmountWei],
-            chainId: base.id, // Force Base chain
+            chainId: base.id,
           })
-          console.log('approve tx hash:', approveHash)
         } catch (error) {
-          console.error('=== APPROVE ERROR ===')
-          console.error('Error type:', (error as Error)?.name)
-          console.error('Error message:', (error as Error)?.message)
-          console.error('Full error:', error)
+          console.error('=== APPROVE ERROR ===', error)
           const parsed = parseTransactionError(error)
-          setTxState(prev => ({
-            ...prev,
-            subState: 'error',
-            error: parsed,
-          }))
+          setTxState(prev => ({ ...prev, subState: 'error', error: parsed }))
           orchestratingRef.current = false
           return
         }
 
-        setTxState(prev => ({
-          ...prev,
-          subState: 'tx_submitted',
-          txHash: approveHash,
-        }))
+        setTxState(prev => ({ ...prev, subState: 'tx_submitted', txHash: approveHash }))
 
-        console.log('Waiting for approval receipt...')
         setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
-
         const approveSuccess = await waitForReceipt(approveHash)
         if (!approveSuccess) {
           setTxState(prev => ({
             ...prev,
             subState: 'error',
-            error: {
-              title: 'Approval Failed',
-              message: 'USDC approval transaction failed.',
-              action: 'Please try again.',
-            },
+            error: { title: 'Approval Failed', message: 'USDC approval transaction failed.', action: 'Please try again.' },
           }))
           orchestratingRef.current = false
           return
         }
 
-        // Verify allowance on-chain (with retry for RPC sync delay)
         console.log('Verifying allowance on-chain...')
         let allowanceVerified = false
         for (let attempt = 0; attempt < 3; attempt++) {
-          // Wait for RPC to sync
           await new Promise(r => setTimeout(r, 2000))
           allowanceVerified = await verifyAllowance(address, currentVaultAddress, depositAmountWei)
           if (allowanceVerified) break
-          console.log(`Allowance not yet visible, retry ${attempt + 1}/3...`)
         }
         if (!allowanceVerified) {
           setTxState(prev => ({
             ...prev,
             subState: 'error',
-            error: {
-              title: 'Verification Failed',
-              message: 'Could not verify USDC allowance.',
-              action: 'Please try again.',
-            },
+            error: { title: 'Verification Failed', message: 'Could not verify USDC allowance.', action: 'Please try again.' },
           }))
           orchestratingRef.current = false
           return
         }
 
-        setTxState(prev => ({
-          ...prev,
-          allowanceVerified: true,
-          subState: 'confirmed',
-        }))
-
-        console.log('Allowance verified')
+        setTxState(prev => ({ ...prev, allowanceVerified: true, subState: 'confirmed' }))
         await new Promise(r => setTimeout(r, 500))
       } else {
-        console.log('Sufficient allowance already exists')
-        setTxState(prev => ({
-          ...prev,
-          allowanceVerified: true,
-        }))
+        setTxState(prev => ({ ...prev, allowanceVerified: true }))
       }
 
       // ============================================
       // STEP 3: DEPOSIT
       // ============================================
-
-      setTxState(prev => ({
-        ...prev,
-        step: 'deposit',
-        subState: 'awaiting_wallet',
-        error: null,
-      }))
+      setTxState(prev => ({ ...prev, step: 'deposit', subState: 'awaiting_wallet', error: null }))
 
       console.log('Depositing USDC...')
-      console.log('Vault address for deposit:', currentVaultAddress)
-      console.log('Deposit amount:', depositAmountWei.toString())
       let depositHash: Hash
 
       try {
@@ -464,98 +405,63 @@ export default function SetupPage() {
           abi: VAULT_ABI,
           functionName: 'depositUSDC',
           args: [depositAmountWei],
-          chainId: base.id, // Force Base chain
+          chainId: base.id,
         })
-        console.log('depositUSDC tx hash:', depositHash)
       } catch (error) {
-        console.error('=== DEPOSIT ERROR ===')
-        console.error('Error type:', (error as Error)?.name)
-        console.error('Error message:', (error as Error)?.message)
-        console.error('Full error:', error)
+        console.error('=== DEPOSIT ERROR ===', error)
         const parsed = parseTransactionError(error)
-        setTxState(prev => ({
-          ...prev,
-          subState: 'error',
-          error: parsed,
-        }))
+        setTxState(prev => ({ ...prev, subState: 'error', error: parsed }))
         orchestratingRef.current = false
         return
       }
 
-      setTxState(prev => ({
-        ...prev,
-        subState: 'tx_submitted',
-        txHash: depositHash,
-      }))
+      setTxState(prev => ({ ...prev, subState: 'tx_submitted', txHash: depositHash }))
 
-      console.log('Waiting for deposit receipt...')
       setTxState(prev => ({ ...prev, subState: 'confirming_onchain' }))
-
       const depositSuccess = await waitForReceipt(depositHash)
       if (!depositSuccess) {
         setTxState(prev => ({
           ...prev,
           subState: 'error',
-          error: {
-            title: 'Deposit Failed',
-            message: 'Deposit transaction failed.',
-            action: 'Please try again.',
-          },
+          error: { title: 'Deposit Failed', message: 'Deposit transaction failed.', action: 'Please try again.' },
         }))
         orchestratingRef.current = false
         return
       }
 
-      // Verify vault has holdings
-      console.log('Verifying deposit on-chain...')
       const hasHoldings = await verifyVaultHasHoldings(currentVaultAddress)
       if (!hasHoldings) {
         setTxState(prev => ({
           ...prev,
           subState: 'error',
-          error: {
-            title: 'Verification Failed',
-            message: 'Could not verify deposit completed.',
-            action: 'Check your vault on Basescan.',
-          },
+          error: { title: 'Verification Failed', message: 'Could not verify deposit completed.', action: 'Check your vault on Basescan.' },
         }))
         orchestratingRef.current = false
         return
       }
 
       // ============================================
-      // SUCCESS - All steps verified on-chain
+      // SUCCESS
       // ============================================
+      setTxState(prev => ({ ...prev, step: 'complete', subState: 'confirmed', depositVerified: true }))
 
-      setTxState(prev => ({
-        ...prev,
-        step: 'complete',
-        subState: 'confirmed',
-        depositVerified: true,
-      }))
-
-      // Store vault in localStorage
-      storeVault(address, allocation, currentVaultAddress)
+      if (isExplicitRulesMode) {
+        storeVault(address, 100 + customBtcPct, currentVaultAddress)
+      } else {
+        storeVault(address, allocation, currentVaultAddress)
+      }
 
       console.log('Deposit complete and verified!')
-
-      // Redirect to portfolio after brief delay
-      setTimeout(() => {
-        router.push('/portfolio')
-      }, 2000)
+      setTimeout(() => router.push('/portfolio'), 2000)
 
     } catch (error) {
       console.error('Orchestration error:', error)
       const parsed = parseTransactionError(error)
-      setTxState(prev => ({
-        ...prev,
-        subState: 'error',
-        error: parsed,
-      }))
+      setTxState(prev => ({ ...prev, subState: 'error', error: parsed }))
     } finally {
       orchestratingRef.current = false
     }
-  }, [address, selectedAllocation, existingVaultAddress, depositAmountWei, writeContractAsync, router, chainId, switchChain])
+  }, [address, selectedAllocation, existingVaultAddress, depositAmountWei, writeContractAsync, router, chainId, switchChain, isExplicitRulesMode, customBtcPct, currentThreshold])
 
   // ============================================
   // UI HANDLERS
@@ -566,16 +472,14 @@ export default function SetupPage() {
     setInputError(null)
 
     if (address) {
-      // Check localStorage first (fast)
       const storedVault = getStoredVault(address, allocation.id)
       if (storedVault) {
         setExistingVaultAddress(storedVault)
       } else {
-        // Check on-chain (slower but authoritative)
         const onChainVault = await verifyVaultExists(address, allocation.id)
         if (onChainVault) {
           setExistingVaultAddress(onChainVault)
-          storeVault(address, allocation.id, onChainVault) // sync localStorage
+          storeVault(address, allocation.id, onChainVault)
         } else {
           setExistingVaultAddress(null)
         }
@@ -590,8 +494,13 @@ export default function SetupPage() {
     }
   }
 
+  const goToExplicitRules = () => {
+    setSelectedAllocation(null)
+    setSetupStep('explicit-rules')
+  }
+
   const goToAmount = () => {
-    if (selectedAllocation) {
+    if (setupStep === 'explicit-rules' || selectedAllocation) {
       setSetupStep('amount')
     }
   }
@@ -612,15 +521,25 @@ export default function SetupPage() {
 
   const goBack = () => {
     setInputError(null)
-    if (setupStep === 'amount') setSetupStep('allocation')
+    if (setupStep === 'amount') {
+      if (isExplicitRulesMode) {
+        setSetupStep('explicit-rules')
+      } else {
+        setSetupStep('allocation')
+      }
+    }
     if (setupStep === 'review') setSetupStep('amount')
+    if (setupStep === 'explicit-rules') {
+      setSetupStep('allocation')
+      setSelectedAllocation(null)
+    }
   }
 
   const handleConfirm = () => {
-    if (!selectedAllocation || !factoryConfigured) return
+    if (!isExplicitRulesMode && !selectedAllocation) return
+    if (!factoryConfigured) return
     setSetupStep('processing')
     setTxState(INITIAL_STATE)
-    // Start orchestration
     runOrchestration()
   }
 
@@ -634,20 +553,19 @@ export default function SetupPage() {
     setSetupStep('review')
   }
 
-  // Don't render until mounted to avoid hydration mismatch
   if (!mounted || !isConnected) return null
 
   // ============================================
-  // RENDER: Allocation Selection
+  // RENDER: Allocation Selection (Presets)
   // ============================================
   if (setupStep === 'allocation') {
     return (
       <div className="flex flex-col min-h-[85vh]">
         <button
           onClick={() => router.push('/')}
-          className="text-[var(--primary)] text-sm mb-8 text-left hover:opacity-70 font-medium"
+          className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)]"
         >
-          ← Back
+          Back
         </button>
 
         <div className="flex gap-2 mb-8">
@@ -656,9 +574,9 @@ export default function SetupPage() {
           <div className="h-1 flex-1 rounded-full bg-[var(--border)]" />
         </div>
 
-        <h1 className="text-3xl font-semibold mb-2">Choose allocation</h1>
-        <p className="text-[var(--muted)] mb-8">
-          How much of your deposit should be in Bitcoin?
+        <h1 className="text-2xl font-semibold mb-2">Choose your ratio</h1>
+        <p className="text-[var(--muted)] text-sm mb-8">
+          What portion stays in Bitcoin vs dollars?
         </p>
 
         <div className="space-y-3 flex-1">
@@ -666,30 +584,167 @@ export default function SetupPage() {
             <button
               key={allocation.id}
               onClick={() => handleAllocationSelect(allocation)}
-              className={`w-full p-5 rounded-2xl text-left transition-all ${
+              className={`w-full p-4 rounded-xl text-left transition-all border ${
                 selectedAllocation?.id === allocation.id
-                  ? 'bg-[var(--primary)] text-white'
-                  : 'bg-[var(--background-secondary)] hover:bg-[var(--background-tertiary)]'
+                  ? 'border-[var(--primary)] bg-[var(--primary)]/10'
+                  : 'border-[var(--border)] bg-[var(--background-secondary)] hover:border-[var(--muted)]'
               }`}
             >
               <div className="flex justify-between items-center">
                 <div>
-                  <div className="font-semibold text-lg">{allocation.name}</div>
-                  <div className={`text-sm ${selectedAllocation?.id === allocation.id ? 'text-white/70' : 'text-[var(--muted)]'}`}>
-                    {allocation.btcPct}% BTC · {100 - allocation.btcPct}% USDC
+                  <div className="font-medium">{allocation.btcPct}% Bitcoin</div>
+                  <div className="text-sm text-[var(--muted)]">
+                    {100 - allocation.btcPct}% USDC
                   </div>
                 </div>
                 {selectedAllocation?.id === allocation.id && (
-                  <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                  </svg>
+                  <div className="w-5 h-5 rounded-full bg-[var(--primary)] flex items-center justify-center">
+                    <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
                 )}
               </div>
             </button>
           ))}
+
+          {/* Explicit Rules entry - separate from presets */}
+          <div className="pt-4 border-t border-[var(--border)] mt-4">
+            <button
+              onClick={goToExplicitRules}
+              className="w-full p-4 rounded-xl text-left border border-dashed border-[var(--border)] hover:border-[var(--muted)] transition-all"
+            >
+              <div className="flex justify-between items-center">
+                <div>
+                  <div className="font-medium text-[var(--muted)]">Explicit rules</div>
+                  <div className="text-sm text-[var(--muted)] opacity-70">
+                    Custom allocation and threshold
+                  </div>
+                </div>
+                <svg className="w-4 h-4 text-[var(--muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+            </button>
+          </div>
         </div>
 
         <Button size="large" onClick={goToAmount} disabled={!selectedAllocation} className="mt-6">
+          Continue
+        </Button>
+      </div>
+    )
+  }
+
+  // ============================================
+  // RENDER: Explicit Rules Mode
+  // ============================================
+  if (setupStep === 'explicit-rules') {
+    return (
+      <div className="flex flex-col min-h-[85vh]">
+        <button
+          onClick={goBack}
+          className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)]"
+        >
+          Back
+        </button>
+
+        <div className="flex gap-2 mb-8">
+          <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
+          <div className="h-1 flex-1 rounded-full bg-[var(--border)]" />
+          <div className="h-1 flex-1 rounded-full bg-[var(--border)]" />
+        </div>
+
+        <h1 className="text-2xl font-semibold mb-2">Define your rules</h1>
+        <p className="text-[var(--muted)] text-sm mb-2">
+          You are setting explicit parameters for your vault.
+        </p>
+        <p className="text-xs text-[var(--muted)] opacity-70 mb-8">
+          These values are immutable once the vault is created.
+        </p>
+
+        <div className="space-y-8 flex-1">
+          {/* Rule 1: Allocation */}
+          <div>
+            <div className="flex justify-between items-center mb-3">
+              <span className="text-sm font-medium">Allocation rule</span>
+              <span className="text-sm text-[var(--muted)]">BTC / USDC</span>
+            </div>
+
+            {/* Allocation selector - constrained steps */}
+            <div className="grid grid-cols-5 gap-2 mb-3">
+              {[10, 25, 50, 75, 90].map((pct) => (
+                <button
+                  key={pct}
+                  onClick={() => setCustomBtcPct(pct)}
+                  className={`py-2 rounded-lg text-sm font-medium transition-all ${
+                    customBtcPct === pct
+                      ? 'bg-[var(--primary)] text-white'
+                      : 'bg-[var(--background-secondary)] text-[var(--muted)] hover:bg-[var(--background-tertiary)]'
+                  }`}
+                >
+                  {pct}%
+                </button>
+              ))}
+            </div>
+
+            {/* Fine-tune with other values */}
+            <select
+              value={customBtcPct}
+              onChange={(e) => setCustomBtcPct(parseInt(e.target.value))}
+              className="w-full p-3 rounded-lg bg-[var(--background-secondary)] border border-[var(--border)] text-sm"
+            >
+              {ALLOCATION_STEPS.map((pct) => (
+                <option key={pct} value={pct}>
+                  {pct}% Bitcoin / {100 - pct}% USDC
+                </option>
+              ))}
+            </select>
+
+            {/* Visual bar */}
+            <div className="h-2 rounded-full overflow-hidden bg-[var(--border)] flex mt-3">
+              <div className="bg-orange-500 transition-all" style={{ width: `${customBtcPct}%` }} />
+              <div className="bg-blue-500 transition-all" style={{ width: `${100 - customBtcPct}%` }} />
+            </div>
+          </div>
+
+          {/* Rule 2: Threshold */}
+          <div>
+            <div className="flex justify-between items-center mb-3">
+              <span className="text-sm font-medium">Rebalance threshold</span>
+              <span className="text-sm text-[var(--muted)]">{currentThreshold}% drift</span>
+            </div>
+
+            <p className="text-xs text-[var(--muted)] mb-4">
+              Rebalancing triggers when allocation drifts this far from target.
+            </p>
+
+            {/* Threshold selector with labels */}
+            <div className="space-y-2">
+              {THRESHOLD_PRESETS.map((preset, index) => (
+                <button
+                  key={preset.value}
+                  onClick={() => setCustomThresholdIndex(index)}
+                  className={`w-full p-3 rounded-lg text-left transition-all border ${
+                    customThresholdIndex === index
+                      ? 'border-[var(--primary)] bg-[var(--primary)]/10'
+                      : 'border-[var(--border)] bg-[var(--background-secondary)] hover:border-[var(--muted)]'
+                  }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <span className="font-medium">{preset.label}</span>
+                      <span className="text-[var(--muted)] ml-2">({preset.value}%)</span>
+                    </div>
+                    <span className="text-xs text-[var(--muted)]">{preset.description}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <Button size="large" onClick={goToAmount} className="mt-6">
           Continue
         </Button>
       </div>
@@ -704,9 +759,9 @@ export default function SetupPage() {
       <div className="flex flex-col min-h-[85vh]">
         <button
           onClick={goBack}
-          className="text-[var(--primary)] text-sm mb-8 text-left hover:opacity-70 font-medium"
+          className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)]"
         >
-          ← Back
+          Back
         </button>
 
         <div className="flex gap-2 mb-8">
@@ -715,20 +770,20 @@ export default function SetupPage() {
           <div className="h-1 flex-1 rounded-full bg-[var(--border)]" />
         </div>
 
-        <h1 className="text-3xl font-semibold mb-2">Enter amount</h1>
-        <p className="text-[var(--muted)] mb-8">How much USDC to deposit?</p>
+        <h1 className="text-2xl font-semibold mb-2">Enter amount</h1>
+        <p className="text-[var(--muted)] text-sm mb-8">How much USDC to deposit?</p>
 
         <div className="flex-1 flex flex-col justify-center">
           <div className="text-center mb-8">
             <div className="inline-flex items-baseline">
-              <span className="text-4xl text-[var(--muted)] mr-1">$</span>
+              <span className="text-3xl text-[var(--muted)] mr-1">$</span>
               <input
                 type="text"
                 inputMode="decimal"
                 value={amount}
                 onChange={(e) => handleAmountChange(e.target.value)}
                 placeholder="0"
-                className="text-6xl font-semibold bg-transparent text-center w-48 focus:outline-none"
+                className="text-5xl font-semibold bg-transparent text-center w-40 focus:outline-none"
                 style={{ caretColor: 'var(--primary)' }}
                 autoFocus
               />
@@ -761,16 +816,20 @@ export default function SetupPage() {
   // RENDER: Review
   // ============================================
   if (setupStep === 'review') {
-    const btcAmount = (parseFloat(amount) * (selectedAllocation?.btcPct ?? 0) / 100)
-    const usdcAmount = (parseFloat(amount) * (100 - (selectedAllocation?.btcPct ?? 0)) / 100)
+    const btcPct = isExplicitRulesMode ? customBtcPct : (selectedAllocation?.btcPct ?? 0)
+    const btcAmount = (parseFloat(amount) * btcPct / 100)
+    const usdcAmount = (parseFloat(amount) * (100 - btcPct) / 100)
+    const allocationLabel = isExplicitRulesMode
+      ? `Custom: ${customBtcPct}% / ${100 - customBtcPct}%`
+      : `${btcPct}% / ${100 - btcPct}%`
 
     return (
       <div className="flex flex-col min-h-[85vh]">
         <button
           onClick={goBack}
-          className="text-[var(--primary)] text-sm mb-8 text-left hover:opacity-70 font-medium"
+          className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)]"
         >
-          ← Back
+          Back
         </button>
 
         <div className="flex gap-2 mb-8">
@@ -779,43 +838,57 @@ export default function SetupPage() {
           <div className="h-1 flex-1 rounded-full bg-[var(--primary)]" />
         </div>
 
-        <h1 className="text-3xl font-semibold mb-8">Review</h1>
+        <h1 className="text-2xl font-semibold mb-8">Review</h1>
 
         <div className="flex-1 space-y-4">
           <Card variant="elevated" padding="large">
             <div className="text-sm text-[var(--muted)] mb-1">Depositing</div>
-            <div className="font-semibold text-3xl">${parseFloat(amount).toLocaleString()}</div>
+            <div className="font-semibold text-2xl">${parseFloat(amount).toLocaleString()}</div>
           </Card>
 
           <Card variant="elevated" padding="large">
-            <div className="text-sm text-[var(--muted)] mb-3">Will be split into</div>
-            <div className="space-y-3">
-              <div className="flex justify-between items-center">
+            <div className="text-sm text-[var(--muted)] mb-3">
+              {isExplicitRulesMode ? 'Custom allocation' : 'Allocation'}: {allocationLabel}
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-sm">
                 <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full bg-orange-500" />
-                  <span>BTC</span>
+                  <div className="w-2 h-2 rounded-full bg-orange-500" />
+                  <span>Bitcoin</span>
                 </div>
                 <span className="font-medium">~${btcAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
               </div>
-              <div className="flex justify-between items-center">
+              <div className="flex justify-between items-center text-sm">
                 <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full bg-blue-500" />
+                  <div className="w-2 h-2 rounded-full bg-blue-500" />
                   <span>USDC</span>
                 </div>
                 <span className="font-medium">~${usdcAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
               </div>
             </div>
-            <div className="h-2 rounded-full overflow-hidden bg-[var(--border)] flex mt-4">
-              <div className="bg-orange-500" style={{ width: `${selectedAllocation?.btcPct}%` }} />
-              <div className="bg-blue-500" style={{ width: `${100 - (selectedAllocation?.btcPct ?? 0)}%` }} />
+            <div className="h-2 rounded-full overflow-hidden bg-[var(--border)] flex mt-3">
+              <div className="bg-orange-500" style={{ width: `${btcPct}%` }} />
+              <div className="bg-blue-500" style={{ width: `${100 - btcPct}%` }} />
             </div>
           </Card>
+
+          {isExplicitRulesMode && (
+            <Card variant="default" padding="default">
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-[var(--muted)]">Rebalance threshold</span>
+                <span className="font-medium">
+                  {THRESHOLD_PRESETS[customThresholdIndex].label} ({currentThreshold}%)
+                </span>
+              </div>
+            </Card>
+          )}
 
           <Card variant="default" padding="default">
             <p className="text-xs text-[var(--muted)]">
               {existingVaultAddress
-                ? 'You will approve USDC spending, then confirm the deposit. Each step requires wallet confirmation.'
-                : 'You will create your vault, approve USDC spending, then confirm the deposit. Each step requires wallet confirmation.'}
+                ? 'You will approve USDC spending, then confirm the deposit.'
+                : 'You will create your vault, approve USDC spending, then confirm the deposit.'}
+              {' '}Each step requires wallet confirmation.
             </p>
           </Card>
 
@@ -835,11 +908,9 @@ export default function SetupPage() {
           )}
         </div>
 
-        <div className="mt-8 space-y-3">
-          <Button size="large" onClick={handleConfirm} disabled={!factoryConfigured || isWrongChain}>
-            {existingVaultAddress ? 'Deposit' : 'Create Vault & Deposit'}
-          </Button>
-        </div>
+        <Button size="large" onClick={handleConfirm} disabled={!factoryConfigured || isWrongChain} className="mt-8">
+          {existingVaultAddress ? 'Deposit' : 'Create Vault & Deposit'}
+        </Button>
       </div>
     )
   }
@@ -854,7 +925,6 @@ export default function SetupPage() {
   return (
     <div className="flex flex-col min-h-[85vh] items-center justify-center">
       <div className="text-center max-w-xs">
-        {/* Status indicator */}
         <div className="mb-8">
           {isComplete ? (
             <div className="w-16 h-16 mx-auto rounded-full bg-green-500/20 flex items-center justify-center">
@@ -876,19 +946,10 @@ export default function SetupPage() {
         <h2 className="text-xl font-semibold mb-2">{message.title}</h2>
         <p className="text-[var(--muted)]">{message.subtitle}</p>
 
-        {/* Error action */}
         {isError && txState.error?.action && (
           <p className="text-sm text-[var(--muted)] mt-4">{txState.error.action}</p>
         )}
 
-        {/* Show raw error in development */}
-        {isError && process.env.NODE_ENV === 'development' && (
-          <p className="text-xs text-red-400 mt-4 max-w-xs break-all">
-            Check browser console for details
-          </p>
-        )}
-
-        {/* Progress steps - only show when not in error or complete */}
         {!isError && !isComplete && (
           <div className="mt-8 space-y-3 text-left">
             <StepIndicator
@@ -909,7 +970,6 @@ export default function SetupPage() {
           </div>
         )}
 
-        {/* Action buttons */}
         {isError && (
           <div className="mt-8 space-y-3">
             <Button size="large" onClick={handleRetry}>

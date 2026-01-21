@@ -54,7 +54,9 @@ contract ForkProof is Test {
             USDC_USD_FEED,
             SWAP_ROUTER,
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, // 50% BTC
+            5000, // 50% USDC
+            500   // 5% drift threshold
         );
         vm.stopPrank();
 

@@ -11,7 +11,6 @@ import "forge-std/Script.sol";
 import "forge-std/console2.sol";
 
 import {MeezanVault} from "../src/MeezanVault.sol";
-import {AllocationPreset} from "../src/AllocationPresets.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -43,7 +42,9 @@ contract DeployBaseFork is Script {
             USDC_USD_FEED,
             SWAP_ROUTER,
             POOL_FEE,
-            AllocationPreset.Split50_50
+            5000, // 50% BTC
+            5000, // 50% USDC
+            500   // 5% drift threshold
         );
 
         vm.stopBroadcast();

@@ -4,7 +4,11 @@ import { Suspense, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
-import { useVaultState, useRebalance } from '@/lib/hooks'
+import { useVaultState, useRebalance, useGasEstimate, useVaultActivity, useOracleHealth, useBtcPrice } from '@/lib/hooks'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { ActivityLog } from '@/components/ActivityLog'
+import { OracleStatus } from '@/components/OracleStatus'
+import { SystemStatus } from '@/components/SystemStatus'
 import { getUserVaults } from '@/lib/store'
 import { parseError } from '@/lib/errors'
 
@@ -43,12 +47,15 @@ function DetailsContent() {
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
   const [rebalanceState, setRebalanceState] = useState<RebalanceState>('idle')
   const [rebalanceError, setRebalanceError] = useState<{ title: string; message: string } | null>(null)
+  const [showRebalanceConfirm, setShowRebalanceConfirm] = useState(false)
   const [mounted, setMounted] = useState(false)
 
-  const { holdings, values, allocations, drift, allocation, isLoading, refetch } = useVaultState(vaultAddress)
+  const { holdings, values, allocations, drift, driftThreshold, allocationName, isLoading, refetch } = useVaultState(vaultAddress)
   const { rebalance, isPending, isConfirming, isSuccess, error: rawRebalanceError } = useRebalance(vaultAddress)
-
-  const DRIFT_THRESHOLD = 5
+  const { estimateUsd } = useGasEstimate()
+  const { activities, isLoading: activitiesLoading } = useVaultActivity(vaultAddress)
+  const { overall: oracleHealth, isLoading: oracleLoading } = useOracleHealth()
+  const { price: btcPrice } = useBtcPrice()
 
   useEffect(() => {
     setMounted(true)
@@ -100,7 +107,12 @@ function DetailsContent() {
 
   if (!mounted || !isConnected) return null
 
-  const handleRebalance = () => {
+  const handleRebalanceClick = () => {
+    setShowRebalanceConfirm(true)
+  }
+
+  const handleRebalanceConfirm = () => {
+    setShowRebalanceConfirm(false)
     setRebalanceError(null)
     setRebalanceState('confirming')
     rebalance()
@@ -111,7 +123,7 @@ function DetailsContent() {
     setRebalanceState('idle')
   }
 
-  const canRebalance = drift >= DRIFT_THRESHOLD
+  const canRebalance = drift >= driftThreshold
   const hasBalance = values.total > 0
 
   // Transaction states - minimal
@@ -119,7 +131,7 @@ function DetailsContent() {
     return (
       <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
         <p className="text-lg mb-2">Allocation restored</p>
-        <p className="text-sm text-[var(--muted)]">Back to {allocation?.name || 'target'}</p>
+        <p className="text-sm text-[var(--muted)]">Back to {allocationName || 'target'}</p>
       </div>
     )
   }
@@ -157,43 +169,62 @@ function DetailsContent() {
       {/* Back link */}
       <button
         onClick={() => router.push('/portfolio')}
-        className="text-[var(--muted)] text-sm mb-12 text-left hover:text-[var(--foreground)]"
+        className="text-[var(--muted)] text-sm mb-10 text-left hover:text-[var(--foreground)] transition-colors"
       >
-        Back
+        ← Portfolio
       </button>
 
-      {/* Allocation state */}
-      <div className="mb-12">
-        <p className="text-sm text-[var(--muted)] mb-1">Target allocation</p>
-        <p className="text-2xl font-light">{allocation?.name || '—'}</p>
+      {/* Header - allocation and drift side by side */}
+      <div className="flex justify-between items-start mb-10">
+        <div>
+          <p className="text-[10px] text-[var(--muted)] uppercase tracking-[0.15em] mb-2">Target</p>
+          <p className="text-xl font-light">{allocationName || '—'}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] text-[var(--muted)] uppercase tracking-[0.15em] mb-2">Drift</p>
+          <p className={`text-xl font-light tabular-nums ${drift < driftThreshold ? 'text-[var(--foreground)]' : 'text-[var(--warning)]'}`}>
+            {isLoading ? '—' : `${drift.toFixed(1)}%`}
+          </p>
+        </div>
       </div>
 
-      {/* Drift - the key metric */}
-      <div className="mb-12">
-        <p className="text-sm text-[var(--muted)] mb-1">Current drift</p>
-        <p className={`text-2xl font-light ${drift < DRIFT_THRESHOLD ? 'text-[var(--foreground)]' : 'text-[var(--warning)]'}`}>
-          {isLoading ? '—' : `${drift.toFixed(1)}%`}
-        </p>
-        {!isLoading && drift < DRIFT_THRESHOLD && (
-          <p className="text-sm text-[var(--muted)] mt-2">Within tolerance</p>
-        )}
-      </div>
+      {/* Forward-looking signal - understated */}
+      {!isLoading && hasBalance && (
+        <div className="mb-10 text-center">
+          {drift >= driftThreshold ? (
+            <p className="text-sm text-[var(--warning)]">
+              Rebalance available
+            </p>
+          ) : (
+            <p className="text-sm text-[var(--muted)]">
+              {(driftThreshold - drift).toFixed(1)}% below {driftThreshold}% threshold
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Holdings breakdown - balance sheet style */}
       <div className="flex-1">
-        <p className="text-sm text-[var(--muted)] mb-4">Holdings</p>
+        {/* Signature divider */}
+        <div className="flex items-center gap-4 mb-6">
+          <div className="flex-1 h-px bg-[var(--border)]" />
+          <span className="text-[10px] text-[var(--muted)] uppercase tracking-[0.2em]">Holdings</span>
+          <div className="flex-1 h-px bg-[var(--border)]" />
+        </div>
 
-        <div className="space-y-6">
+        <div className="space-y-5">
           {/* Bitcoin */}
-          <div className="border-b border-[var(--border)] pb-4">
-            <div className="flex justify-between items-baseline mb-2">
+          <div className="flex justify-between items-baseline">
+            <div>
               <span>Bitcoin</span>
-              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.btc)}</span>
+              <span className="text-sm text-[var(--muted)] ml-2 tabular-nums">
+                {isLoading ? '' : formatBtc(holdings.btc)}
+              </span>
             </div>
-            <div className="flex justify-between text-sm text-[var(--muted)]">
-              <span>{isLoading ? '—' : formatBtc(holdings.btc)} BTC</span>
-              <span>
-                {isLoading ? '—' : `${allocations.current.btc.toFixed(1)}%`}
+            <div className="text-right">
+              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.btc)}</span>
+              <span className="text-sm text-[var(--muted)] ml-3 tabular-nums">
+                {isLoading ? '' : `${allocations.current.btc.toFixed(1)}%`}
                 {hasBalance && !isLoading && (
                   <span className="opacity-50"> / {allocations.target.btc.toFixed(0)}%</span>
                 )}
@@ -202,15 +233,17 @@ function DetailsContent() {
           </div>
 
           {/* USDC */}
-          <div className="border-b border-[var(--border)] pb-4">
-            <div className="flex justify-between items-baseline mb-2">
+          <div className="flex justify-between items-baseline">
+            <div>
               <span>USDC</span>
-              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.usdc)}</span>
+              <span className="text-sm text-[var(--muted)] ml-2 tabular-nums">
+                {isLoading ? '' : Number(formatUnits(holdings.usdc, 6)).toFixed(2)}
+              </span>
             </div>
-            <div className="flex justify-between text-sm text-[var(--muted)]">
-              <span>{isLoading ? '—' : `${Number(formatUnits(holdings.usdc, 6)).toFixed(2)}`} USDC</span>
-              <span>
-                {isLoading ? '—' : `${allocations.current.usdc.toFixed(1)}%`}
+            <div className="text-right">
+              <span className="tabular-nums">{isLoading ? '—' : formatUsd(values.usdc)}</span>
+              <span className="text-sm text-[var(--muted)] ml-3 tabular-nums">
+                {isLoading ? '' : `${allocations.current.usdc.toFixed(1)}%`}
                 {hasBalance && !isLoading && (
                   <span className="opacity-50"> / {allocations.target.usdc.toFixed(0)}%</span>
                 )}
@@ -219,37 +252,79 @@ function DetailsContent() {
           </div>
 
           {/* Total */}
-          <div className="flex justify-between items-baseline">
-            <span className="text-[var(--muted)]">Total</span>
-            <span className="text-xl tabular-nums">{isLoading ? '—' : formatUsd(values.total)}</span>
+          <div className="pt-4 mt-4 border-t border-[var(--border)]">
+            <div className="flex justify-between items-baseline">
+              <span className="text-[var(--muted)]">Total</span>
+              <span className="text-xl tabular-nums">{isLoading ? '—' : formatUsd(values.total)}</span>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Rebalance action - available when needed */}
+      {/* Activity log with causality */}
       {hasBalance && (
-        <div className="pt-8 border-t border-[var(--border)] mt-8">
+        <div className="mt-10">
+          <div className="flex items-center gap-4 mb-6">
+            <div className="flex-1 h-px bg-[var(--border)]" />
+            <span className="text-[10px] text-[var(--muted)] uppercase tracking-[0.2em]">Activity</span>
+            <div className="flex-1 h-px bg-[var(--border)]" />
+          </div>
+          <ActivityLog activities={activities} isLoading={activitiesLoading} showCausality={true} />
+        </div>
+      )}
+
+      {/* Rebalance action - weighty */}
+      {hasBalance && (
+        <div className="py-8 mt-8">
+          <div className="h-px bg-[var(--border)] mb-6" />
           {canRebalance ? (
-            <button
-              onClick={handleRebalance}
-              className="w-full text-center py-3 text-[var(--primary)]"
-            >
-              Restore to {allocation?.name || 'target'}
-            </button>
+            <div className="text-center">
+              <button
+                onClick={handleRebalanceClick}
+                className="text-[var(--primary)] font-medium hover:opacity-80 transition-opacity"
+              >
+                Rebalance now
+              </button>
+              <p className="text-xs text-[var(--muted)] mt-3">
+                Restores allocation to {allocationName || 'target'}
+              </p>
+            </div>
           ) : (
-            <p className="text-center text-sm text-[var(--muted)]">
-              Rebalance available above 5% drift
-            </p>
+            <div className="text-center">
+              <p className="text-sm text-[var(--muted)]">
+                No action needed
+              </p>
+              <p className="text-xs text-[var(--muted)] mt-2 opacity-60">
+                Rebalance triggers at {driftThreshold}% drift
+              </p>
+            </div>
           )}
         </div>
       )}
 
-      {/* Vault address - institutional detail */}
-      {vaultAddress && (
-        <p className="text-xs text-[var(--muted)] text-center mt-8 opacity-50">
-          {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
-        </p>
-      )}
+      {/* System status - understated footer */}
+      <div className="mt-auto pt-6 flex flex-col items-center gap-3">
+        <OracleStatus health={oracleHealth} isLoading={oracleLoading} />
+        {vaultAddress && (
+          <p className="text-[10px] text-[var(--muted)] opacity-40 tabular-nums tracking-wide">
+            {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
+          </p>
+        )}
+      </div>
+
+      {/* Rebalance confirmation dialog */}
+      <ConfirmDialog
+        isOpen={showRebalanceConfirm}
+        onClose={() => setShowRebalanceConfirm(false)}
+        onConfirm={handleRebalanceConfirm}
+        title="Rebalance portfolio"
+        description={`This will restore your allocation to ${allocationName || 'target'} by swapping assets.`}
+        details={[
+          { label: 'Current drift', value: `${drift.toFixed(1)}%` },
+          { label: 'Network fee', value: estimateUsd(200000) },
+        ]}
+        confirmText="Rebalance"
+      />
     </div>
   )
 }

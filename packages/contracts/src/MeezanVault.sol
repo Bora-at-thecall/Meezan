@@ -7,14 +7,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {AllocationPreset, getTargetAllocations} from "./AllocationPresets.sol";
 import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
 contract MeezanVault is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
-    uint16 public constant DEFAULT_DRIFT_BPS = 500;
+    uint16 public constant DEFAULT_DRIFT_BPS = 500;     // 5% default
+    uint16 public constant MIN_DRIFT_BPS = 200;         // 2% minimum
+    uint16 public constant MAX_DRIFT_BPS = 2000;        // 20% maximum
     uint32 public constant COOLDOWN_SECONDS = 43200;
     uint32 public constant MAX_PRICE_STALENESS = 3600;        // 1 hour for volatile assets (BTC)
     uint32 public constant MAX_PRICE_STALENESS_STABLE = 90000; // 25 hours for stablecoins (USDC)
@@ -31,7 +32,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
     error ZeroAddress();
     error IdenticalTokens();
     error InsufficientBalance();
-    error DriftTooLow();
+    error DriftBelowThreshold();
     error CooldownNotElapsed();
     error EmptyVault();
     error InvalidPrice();
@@ -45,6 +46,8 @@ contract MeezanVault is ReentrancyGuard, Pausable {
     error InvalidSlippageBps();
     error NotPendingOwner();
     error CannotRescueVaultToken();
+    error InvalidAllocation();
+    error InvalidDriftThreshold();
 
     event Deposit(address indexed owner, address indexed token, uint256 amount);
     event Withdraw(address indexed owner, address indexed token, uint256 amount);
@@ -76,9 +79,9 @@ contract MeezanVault is ReentrancyGuard, Pausable {
     uint8 public immutable tokenDecimalsB;
     uint8 public immutable feedDecimalsA;
     uint8 public immutable feedDecimalsB;
-    AllocationPreset public immutable allocation;
     uint16 public immutable targetPctA;
     uint16 public immutable targetPctB;
+    uint16 public immutable driftThresholdBps;
     ISwapRouter public immutable swapRouter;
     uint24 public immutable poolFee;
 
@@ -106,13 +109,21 @@ contract MeezanVault is ReentrancyGuard, Pausable {
         address _priceFeedB,
         address _swapRouter,
         uint24 _poolFee,
-        AllocationPreset _allocation
+        uint16 _targetPctA,
+        uint16 _targetPctB,
+        uint16 _driftThresholdBps
     ) {
         if (_tokenA == address(0) || _tokenB == address(0)) revert ZeroAddress();
         if (_priceFeedA == address(0) || _priceFeedB == address(0)) revert ZeroAddress();
         if (_swapRouter == address(0)) revert ZeroAddress();
         if (_tokenA == _tokenB) revert IdenticalTokens();
         if (_poolFee != 100 && _poolFee != 500 && _poolFee != 3000 && _poolFee != 10000) revert InvalidPoolFee();
+
+        // Validate allocation percentages
+        if (_targetPctA + _targetPctB != BPS_DENOMINATOR) revert InvalidAllocation();
+
+        // Validate drift threshold
+        if (_driftThresholdBps < MIN_DRIFT_BPS || _driftThresholdBps > MAX_DRIFT_BPS) revert InvalidDriftThreshold();
 
         uint8 _tokenDecimalsA = IERC20Metadata(_tokenA).decimals();
         uint8 _tokenDecimalsB = IERC20Metadata(_tokenB).decimals();
@@ -133,12 +144,10 @@ contract MeezanVault is ReentrancyGuard, Pausable {
         tokenDecimalsB = _tokenDecimalsB;
         feedDecimalsA = _feedDecimalsA;
         feedDecimalsB = _feedDecimalsB;
-        allocation = _allocation;
+        targetPctA = _targetPctA;
+        targetPctB = _targetPctB;
+        driftThresholdBps = _driftThresholdBps;
         slippageBps = DEFAULT_SLIPPAGE_BPS;
-
-        (uint16 pctA, uint16 pctB) = getTargetAllocations(_allocation);
-        targetPctA = pctA;
-        targetPctB = pctB;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -299,7 +308,7 @@ contract MeezanVault is ReentrancyGuard, Pausable {
         if (totalUsd == 0) revert EmptyVault();
 
         uint16 drift = driftBps();
-        if (drift < DEFAULT_DRIFT_BPS) revert DriftTooLow();
+        if (drift < driftThresholdBps) revert DriftBelowThreshold();
 
         if (msg.sender != owner) {
             if (lastRebalanceAt != 0 && block.timestamp - lastRebalanceAt < COOLDOWN_SECONDS) {

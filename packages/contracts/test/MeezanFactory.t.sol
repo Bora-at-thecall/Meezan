@@ -176,7 +176,92 @@ contract MeezanFactoryTest is Test {
         address vault = factory.createVault(AllocationPreset.Split90_10);
 
         MeezanVault v = MeezanVault(vault);
-        assertEq(uint8(v.allocation()), uint8(AllocationPreset.Split90_10));
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 9000, "Should be 90% BTC");
+        assertEq(pctB, 1000, "Should be 10% USDC");
+    }
+
+    function test_CreatedVaultHasDefaultDriftThreshold() public {
+        vm.prank(user1);
+        address vault = factory.createVault(AllocationPreset.Split50_50);
+
+        MeezanVault v = MeezanVault(vault);
+        assertEq(v.driftThresholdBps(), 500, "Should have default 5% drift threshold");
+    }
+
+    // ========== createAdvancedVault Tests ==========
+
+    function test_CreateAdvancedVaultDeploysNewVault() public {
+        vm.prank(user1);
+        address vault = factory.createAdvancedVault(6000, 4000, 300);
+
+        assertTrue(vault != address(0));
+        assertEq(factory.getAdvancedVault(user1, 6000, 4000, 300), vault);
+    }
+
+    function test_CreateAdvancedVaultWithCustomAllocation() public {
+        vm.prank(user1);
+        address vault = factory.createAdvancedVault(3300, 6700, 500);
+
+        MeezanVault v = MeezanVault(vault);
+        (uint16 pctA, uint16 pctB) = v.targetAllocations();
+        assertEq(pctA, 3300, "Should be 33% BTC");
+        assertEq(pctB, 6700, "Should be 67% USDC");
+    }
+
+    function test_CreateAdvancedVaultWithCustomDriftThreshold() public {
+        vm.prank(user1);
+        address vault = factory.createAdvancedVault(5000, 5000, 200);
+
+        MeezanVault v = MeezanVault(vault);
+        assertEq(v.driftThresholdBps(), 200, "Should have 2% drift threshold");
+    }
+
+    function test_CreateAdvancedVaultEmitsEvent() public {
+        vm.prank(user1);
+        vm.expectEmit(true, false, false, true);
+        emit MeezanFactory.AdvancedVaultDeployed(user1, address(0), 6000, 4000, 300);
+        factory.createAdvancedVault(6000, 4000, 300);
+    }
+
+    function test_CreateAdvancedVaultRevertsIfAlreadyExists() public {
+        vm.startPrank(user1);
+
+        factory.createAdvancedVault(6000, 4000, 300);
+
+        vm.expectRevert(MeezanFactory.AdvancedVaultAlreadyExists.selector);
+        factory.createAdvancedVault(6000, 4000, 300);
+
+        vm.stopPrank();
+    }
+
+    function test_CreateAdvancedVaultDifferentConfigsAllowed() public {
+        vm.startPrank(user1);
+
+        // Same allocation, different drift threshold
+        address vault1 = factory.createAdvancedVault(6000, 4000, 200);
+        address vault2 = factory.createAdvancedVault(6000, 4000, 300);
+
+        assertTrue(vault1 != vault2);
+
+        vm.stopPrank();
+    }
+
+    function test_CreateAdvancedVaultRevertsInvalidAllocation() public {
+        vm.prank(user1);
+        vm.expectRevert(MeezanVault.InvalidAllocation.selector);
+        factory.createAdvancedVault(5000, 4000, 500); // 9000 != 10000
+    }
+
+    function test_CreateAdvancedVaultRevertsInvalidDriftThreshold() public {
+        vm.prank(user1);
+        vm.expectRevert(MeezanVault.InvalidDriftThreshold.selector);
+        factory.createAdvancedVault(5000, 5000, 100); // Below 2% minimum
+    }
+
+    function test_GetAdvancedVaultReturnsZeroIfNoVault() public view {
+        address vault = factory.getAdvancedVault(user1, 6000, 4000, 300);
+        assertEq(vault, address(0));
     }
 
     // ========== Fuzz Tests ==========

@@ -224,7 +224,7 @@ export async function extractVaultAddressFromReceipt(txHash: Hash): Promise<Addr
 }
 
 /**
- * Verify vault exists on-chain via factory read
+ * Verify vault exists on-chain via factory read (Simple mode - presets)
  */
 export async function verifyVaultExists(
   owner: Address,
@@ -251,6 +251,40 @@ export async function verifyVaultExists(
     return vaultAddress
   } catch (error) {
     console.error('Error verifying vault:', error)
+    return null
+  }
+}
+
+/**
+ * Verify advanced vault exists on-chain via factory read (Advanced mode - custom allocations)
+ */
+export async function verifyAdvancedVaultExists(
+  owner: Address,
+  pctA: number,
+  pctB: number,
+  driftThresholdBps: number,
+): Promise<Address | null> {
+  try {
+    const vaultAddress = await withRetry(
+      () => publicClient.readContract({
+        address: CONTRACTS.factory,
+        abi: FACTORY_ABI,
+        functionName: 'getAdvancedVault',
+        args: [owner, pctA, pctB, driftThresholdBps],
+      }),
+      { description: 'verifyAdvancedVaultExists' },
+    )
+
+    const isZeroAddress = vaultAddress === '0x0000000000000000000000000000000000000000'
+    if (isZeroAddress) {
+      console.log('Advanced vault does not exist for', owner, pctA, pctB, driftThresholdBps)
+      return null
+    }
+
+    console.log('Verified advanced vault exists:', vaultAddress)
+    return vaultAddress
+  } catch (error) {
+    console.error('Error verifying advanced vault:', error)
     return null
   }
 }
