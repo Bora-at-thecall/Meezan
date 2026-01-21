@@ -1,94 +1,60 @@
 # Next Action Required
 
-**Status:** READY - Transaction Orchestration Fixed
+**Status:** v2 Phase 1 Complete - Ready for Phase 2
 
-**Last Updated:** 2026-01-19
-
----
-
-## No Immediate Action Required
-
-Transaction orchestration has been fixed. The web app is ready for re-testing.
+**Last Updated:** 2026-01-21
 
 ---
 
-## What Changed
+## v2 Phase 1 Checkpoint
 
-### Transaction Orchestration (Critical Fix)
-- Chain-verified state machine ensures UI only advances after on-chain confirmation
-- Vault address extracted from VaultDeployed event logs (not localStorage assumptions)
-- Each step verifies on-chain state before proceeding to next step
-- User rejections handled gracefully with human-readable error messages
-- Processing screen shows live status for each transaction step
+**Branch:** [`v2-engine-phase1`](https://github.com/Bora-at-thecall/Meezan/tree/v2-engine-phase1)
 
-### Onboarding Flow
-- Welcome screen explains Meezan before asking for wallet connection
-- New "Learn More" screen explains allocations with visual examples
-- Wallet connection screen is simplified (Coinbase primary, others hidden)
+**Commit:** [`73d075b`](https://github.com/Bora-at-thecall/Meezan/commit/73d075b)
 
-### Deposit Flow
-- Progress bar shows current step (1/3, 2/3, 3/3)
-- Review screen shows breakdown before confirming
-- Processing screen shows all steps with live status indicators
-- Clear differentiation: "Confirm in wallet" vs "Waiting for confirmation"
-
-### Error Handling
-- All raw errors converted to human-readable messages
-- Error displays show: title, explanation, suggested action
-- Errors can be dismissed to retry
-
-### Portfolio
-- Withdraw is now the primary action (full-width button)
-- Deposit and Details are secondary actions
-- Clear success/processing states for withdraw
+**Message:** `v2: phase 1 multi-asset vault engine (intent-only) + tests`
 
 ---
 
-## Files Changed
+## What Was Delivered
 
-| File | Changes |
-|------|---------|
-| `lib/tx-orchestrator.ts` | Chain-verified transaction state machine (new) |
-| `app/setup/page.tsx` | Rewritten with strict transaction sequencing |
-| `app/page.tsx` | 3-screen onboarding wizard |
-| `app/portfolio/page.tsx` | Withdraw primary, error handling |
-| `app/details/page.tsx` | Rebalance error handling |
-| `lib/errors.ts` | Human-readable error parser |
-| `ops/STATUS.md` | Transaction state machine diagram |
+### Contracts
+- `MeezanVaultV2.sol` — Multi-asset vault supporting 2-10 assets
+- Fixed-size arrays for gas efficiency
+- Stub rebalance: computes deltas, emits `RebalanceIntent` event (no swaps)
+
+### Tests
+- `MeezanVaultV2.t.sol` — 49 tests covering INV-01 through INV-19
+- All 243 unit tests pass (fork test excluded - requires RPC)
+
+### Documentation
+- `V2_IMPLEMENTATION_PLAN.md` — 6-phase implementation guide
+- `V2_INVARIANTS.md` — 20 formal invariants
+- `V2_AUDIT_SCOPE.md` — Audit engagement preparation
+- `V2_ROLLOUT_PLAN.md` — 5-phase launch strategy
+- `HNWI_PORTFOLIO_RESEARCH.md` — Portfolio research with final decisions
+- `THREAT_MODEL.md` — Extended with v2-specific risks
+
+### Key Decisions
+- Default portfolio: 40% BTC / 30% ETH / 10% SOL / 20% USDC
+- Default drift threshold: 5%
+- All swaps route through USDC intermediary
 
 ---
 
-## Optional: Re-test Flow
+## Next Steps (Phase 2)
 
-To verify the UX improvements:
-
-1. Start the web app: `cd apps/web && npm run dev`
-2. Open http://localhost:3000
-3. Walk through the onboarding flow
-4. Create a vault and deposit
-5. Verify error handling by rejecting a transaction in wallet
+1. Implement swap execution (multi-leg swaps via USDC)
+2. Add slippage aggregation across multi-swap rebalance
+3. Implement partial rebalance handling
+4. MeezanFactoryV2 for deploying v2 vaults
 
 ---
 
-## Deployment Summary
+## v1 Deployment Summary
 
 | Item | Value |
 |------|-------|
 | MeezanFactory | `0x9FfD7a7dd2C730f1E85643868B645778feDF4f8b` |
 | Network | Base Mainnet (8453) |
-| Status Page | `/status` |
-| API Endpoint | `/api/status` |
-
----
-
-## Checklist Progress
-
-- [x] Factory deployed to Base mainnet
-- [x] Contract verified on Sourcify
-- [x] Web app configured with factory address
-- [x] Status monitoring implemented
-- [x] Launch checklist created
-- [x] UX remediation complete
-- [x] Transaction orchestration fixed (chain-verified)
-- [ ] Final re-test (optional)
-- [ ] Push to remote
+| Status | DEPLOYED AND OPERATIONAL |
