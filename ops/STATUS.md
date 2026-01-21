@@ -308,3 +308,55 @@ All transaction states can transition to error:
 ## v1 Ready
 
 Meezan v1 is deployed and operational on Base mainnet.
+
+---
+
+## v2 Implementation Planning (2026-01-21)
+
+### Documentation Status
+
+| Document | Status | Location |
+|----------|--------|----------|
+| V2_DESIGN.md | COMPLETE | `/docs/` |
+| V2_IMPLEMENTATION_PLAN.md | COMPLETE | `/docs/` |
+| V2_INVARIANTS.md | COMPLETE | `/docs/` |
+| V2_AUDIT_SCOPE.md | COMPLETE | `/docs/` |
+| V2_ROLLOUT_PLAN.md | COMPLETE | `/docs/` |
+| THREAT_MODEL.md (v2 section) | COMPLETE | `/docs/` |
+
+### v2 Key Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Drift metric | Max per-asset | Clearest, no masking of single-asset issues |
+| Swap routing | All via USDC | Deepest liquidity, avoids n² pair problem |
+| Asset universe | Curated whitelist | Oracle/liquidity safety, institutional trust |
+| Initial assets | 4 (BTC, ETH, SOL, USDC) | Proven liquidity on Base |
+| Threshold model | Single portfolio | Simplicity, defer per-asset to v2.1 |
+| Audit strategy | Separate v2 audit required | New attack surface |
+
+### Phase 1 Implementation (2026-01-21) ✅
+
+**Commit:** `d7adfb4` on branch `v2-engine-phase1`
+
+| Deliverable | Status | Notes |
+|-------------|--------|-------|
+| `MeezanVaultV2.sol` | COMPLETE | Multi-asset vault (2-10 assets) |
+| `MeezanVaultV2.t.sol` | COMPLETE | 49 tests, all passing |
+| Invariant coverage | COMPLETE | INV-01 through INV-19 tested |
+| Stub rebalance | COMPLETE | Computes deltas, emits intent, no swaps |
+
+**Test Results:**
+```
+MeezanVaultV2Test: 49 tests passed
+All v1 tests: 194 tests passed
+Total: 243 tests passed (fork test excluded - requires RPC)
+```
+
+### Next Steps
+
+1. ✅ Phase 1 implementation complete
+2. ⏳ Phase 2: Swap execution (multi-leg swaps via USDC)
+3. ⏳ MeezanFactoryV2 for deploying v2 vaults
+4. ⏳ Audit firm engagement
+5. ⏳ Testnet deployment

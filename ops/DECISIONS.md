@@ -174,3 +174,97 @@ For v1 MVP, this is acceptable as Base supports larger contracts via EIP-170 exe
 - Yield optimization (out of scope)
 
 ---
+
+## 2026-01-21: Meezan v2 Implementation Planning
+
+**Decision:** Complete implementation planning before writing production code.
+
+**Documents created:**
+
+1. **V2_IMPLEMENTATION_PLAN.md** - Step-by-step implementation guide
+   - 6 phases over ~6 weeks
+   - Contract architecture changes
+   - Data structures (AssetConfig, fixed arrays)
+   - Algorithm specifications (drift calculation, multi-swap rebalance)
+   - Phase-by-phase deliverables
+
+2. **V2_INVARIANTS.md** - 20 formal invariants
+   - Allocation integrity (weight sum = 10000)
+   - Access control (owner-only withdrawals)
+   - Approval safety (no residuals)
+   - Oracle coordination (all feeds fresh)
+   - Rebalance safety (drift gating, slippage bounds)
+   - Withdrawal safety (always available)
+
+3. **V2_AUDIT_SCOPE.md** - Audit engagement preparation
+   - ~1,050 lines of new code
+   - Critical focus areas identified
+   - Reusable vs. modified components
+   - Expected test coverage
+   - Timeline and budget estimates
+
+4. **V2_ROLLOUT_PLAN.md** - Safe phased launch strategy
+   - Phase 0: Internal testing (weeks 1-4)
+   - Phase 1: Testnet public (weeks 5-8)
+   - Phase 2: Guarded launch (weeks 9-12)
+   - Phase 3: Limited availability (weeks 13-16)
+   - Phase 4: General availability (week 17+)
+   - Emergency procedures
+
+5. **THREAT_MODEL.md** - Extended with v2-specific risks
+   - Multi-leg swap vulnerabilities
+   - Partial rebalance risks
+   - Oracle coordination risks
+   - Gas exhaustion scenarios
+   - Multi-asset approval surface
+
+**Reason:** Planning before coding ensures:
+- All stakeholders aligned on approach
+- Security considerations embedded from start
+- Audit scope well-defined
+- Rollout risks minimized
+- No production code written without design approval
+
+---
+
+## 2026-01-21: HNWI Portfolio Research — Final Decisions
+
+**Decision:** Define canonical default portfolio for Meezan v2 HNWI users.
+
+### Asset Universe (FINAL)
+
+| Asset | Status | Rationale |
+|-------|--------|-----------|
+| BTC | APPROVED | Institutional bedrock, ETF-approved, 16+ year track record |
+| ETH | APPROVED | Institutional consensus, ETF-approved, smart contract exposure |
+| SOL | APPROVED (max 15%) | Growth exposure, ETF pending, higher risk contained |
+| USDC | APPROVED | Volatility buffer, rebalancing infrastructure, regulated |
+
+**Excluded:** USDT (regulatory concerns), LINK/AVAX/other alts (insufficient institutional adoption), all memecoins (policy).
+
+### Default Weights (FINAL)
+
+```
+BTC:  40%  — Anchor asset, "digital gold"
+ETH:  30%  — Second pillar, platform exposure
+SOL:  10%  — Growth exposure, risk-contained
+USDC: 20%  — Volatility buffer, rebalancing fuel
+```
+
+**Rationale:** Balanced exposure to institutional-grade crypto with meaningful stablecoin buffer. This is the "Continue without thinking" option for HNWIs.
+
+### Default Drift Threshold (FINAL)
+
+| Preset | Threshold | Use Case |
+|--------|-----------|----------|
+| Tight | 3% | Strict discipline, more activity |
+| **Default** | **5%** | **Balanced discipline and efficiency** |
+| Relaxed | 8% | Minimal activity, accept more drift |
+
+**Rationale:** 5% triggers during meaningful market moves (monthly in volatile markets) without over-trading.
+
+### Documentation Created
+
+- `docs/HNWI_PORTFOLIO_RESEARCH.md` — Full research report with stress scenarios
+
+---
