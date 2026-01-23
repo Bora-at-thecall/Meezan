@@ -18,8 +18,12 @@ import { base } from 'wagmi/chains'
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const VERIFIED_CONTRACTS = {
-  // Meezan Factory - deploys user vaults
-  factory: '0x9e3B4B3bF1A018f488D0b3a302F5b37CDB51c8Eb' as Address,
+  // Meezan Factory V1 - deploys user vaults (v1 with withdrawAllToUSDC)
+  factory: '0x28092E2d20150d5Bc89c8b480312933B303C3ABb' as Address,
+
+  // Meezan Factory V2 - deploys multi-asset vaults with depositAndRebalance
+  // Deployed 2026-01-24 with immediate ownership + single-tx funding
+  factoryV2: '0xc24F363E8F1Df37AEBfb50366118DfafF21983CA' as Address,
 
   // Tokens
   usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,

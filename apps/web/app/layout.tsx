@@ -22,7 +22,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${geistSans.variable} antialiased min-h-screen`}>
         <Providers>
-          <main className="max-w-md mx-auto px-6 py-12">
+          <main className="max-w-md md:max-w-5xl xl:max-w-6xl mx-auto px-6 md:px-10 xl:px-12 py-12">
             {children}
           </main>
         </Providers>

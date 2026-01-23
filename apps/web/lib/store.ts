@@ -52,6 +52,34 @@ export function getUserVaults(walletAddress: string): { allocation: number; addr
   }))
 }
 
+// Remove a vault from storage (e.g., after withdrawal)
+export function removeVault(walletAddress: string, vaultAddress: Address): void {
+  if (typeof window === 'undefined') return
+
+  try {
+    const vaults = getStoredVaults()
+    const userVaults = vaults[walletAddress.toLowerCase()]
+    if (!userVaults) return
+
+    // Find and remove the vault by address
+    for (const [allocation, address] of Object.entries(userVaults)) {
+      if ((address as string).toLowerCase() === vaultAddress.toLowerCase()) {
+        delete userVaults[Number(allocation)]
+        break
+      }
+    }
+
+    // Clean up if no vaults left for user
+    if (Object.keys(userVaults).length === 0) {
+      delete vaults[walletAddress.toLowerCase()]
+    }
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(vaults))
+  } catch (error) {
+    console.error('Failed to remove vault:', error)
+  }
+}
+
 // Clear all stored vault data (for reset/debugging)
 export function clearAllVaults() {
   if (typeof window === 'undefined') return
@@ -61,7 +89,17 @@ export function clearAllVaults() {
 // Expose to window for easy console access
 if (typeof window !== 'undefined') {
   (window as unknown as { resetMeezan: () => void }).resetMeezan = () => {
+    // Clear v1 vaults
     localStorage.removeItem(STORAGE_KEY)
+    // Clear all v2 vaults (they're stored per-address)
+    const keysToRemove: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key && key.startsWith('meezan_v2_vaults_')) {
+        keysToRemove.push(key)
+      }
+    }
+    keysToRemove.forEach(key => localStorage.removeItem(key))
     console.log('Meezan vault cache cleared. Refresh the page.')
   }
 }

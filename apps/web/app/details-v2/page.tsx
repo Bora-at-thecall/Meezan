@@ -4,13 +4,11 @@ import { Suspense, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
-import { useVaultState, useRebalance, useGasEstimate, useVaultActivity, useOracleHealth, useBtcPrice } from '@/lib/hooks'
+import { useVaultStateV2, useRebalanceV2, type AssetHolding } from '@/lib/hooks-v2'
+import { useGasEstimate } from '@/lib/hooks'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { ActivityLog } from '@/components/ActivityLog'
-import { OracleStatus } from '@/components/OracleStatus'
-import { SystemStatus } from '@/components/SystemStatus'
-import { getUserVaults } from '@/lib/store'
 import { parseError } from '@/lib/errors'
+import { formatDriftThreshold } from '@/lib/assets'
 
 type RebalanceState = 'idle' | 'confirming' | 'pending' | 'success' | 'error'
 
@@ -33,14 +31,89 @@ function formatUsd(value: number): string {
   }).format(value)
 }
 
-function formatBtc(satoshis: bigint): string {
-  const btc = Number(formatUnits(satoshis, 8))
-  if (btc === 0) return '0'
-  if (btc < 0.0001) return '<0.0001'
-  return btc.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 8 })
+function formatBalance(balance: bigint, decimals: number, symbol: string): string {
+  const value = Number(formatUnits(balance, decimals))
+  if (value === 0) return '0'
+
+  if (symbol === 'BTC') {
+    if (value < 0.0001) return '<0.0001'
+    return value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 8 })
+  } else if (symbol === 'USDC') {
+    return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  } else {
+    if (value < 0.001) return '<0.001'
+    return value.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 4 })
+  }
 }
 
-function DetailsContent() {
+// Asset row with target/current/drift breakdown
+function AssetRow({ asset, needsRebalance }: { asset: AssetHolding; needsRebalance: boolean }) {
+  const isOverweight = asset.currentWeightPct > asset.targetWeightPct
+  const isUnderweight = asset.currentWeightPct < asset.targetWeightPct
+  const driftDirection = isOverweight ? '+' : isUnderweight ? '-' : ''
+
+  return (
+    <div className={`p-4 rounded-lg border ${asset.isMaxDrift && needsRebalance ? 'border-[var(--warning)] bg-[var(--warning)]/5' : 'border-[var(--border)]'}`}>
+      {/* Asset header */}
+      <div className="flex justify-between items-start mb-3">
+        <div className="flex items-center gap-2">
+          <span
+            className="w-3 h-3 rounded-full"
+            style={{ backgroundColor: asset.color }}
+          />
+          <span className="font-medium">{asset.name}</span>
+          <span className="text-sm text-[var(--muted)]">{asset.symbol}</span>
+        </div>
+        <div className="text-right">
+          <p className="tabular-nums">{formatUsd(asset.valueUsd)}</p>
+          <p className="text-sm text-[var(--muted)] tabular-nums">
+            {formatBalance(asset.balance, asset.decimals, asset.symbol)} {asset.symbol}
+          </p>
+        </div>
+      </div>
+
+      {/* Weight breakdown */}
+      <div className="flex gap-6 text-sm">
+        <div>
+          <p className="text-xs text-[var(--muted)] uppercase tracking-wider mb-1">Target</p>
+          <p className="tabular-nums">{asset.targetWeightPct.toFixed(0)}%</p>
+        </div>
+        <div>
+          <p className="text-xs text-[var(--muted)] uppercase tracking-wider mb-1">Current</p>
+          <p className="tabular-nums">{asset.currentWeightPct.toFixed(1)}%</p>
+        </div>
+        <div>
+          <p className="text-xs text-[var(--muted)] uppercase tracking-wider mb-1">Drift</p>
+          <p className={`tabular-nums ${asset.isMaxDrift && needsRebalance ? 'text-[var(--warning)]' : ''}`}>
+            {driftDirection}{asset.driftPct.toFixed(1)}%
+            {asset.isMaxDrift && needsRebalance && (
+              <span className="ml-1 text-xs">(max)</span>
+            )}
+          </p>
+        </div>
+      </div>
+
+      {/* Visual weight bar */}
+      <div className="mt-3 h-1.5 rounded-full bg-[var(--border)] overflow-hidden relative">
+        {/* Target indicator */}
+        <div
+          className="absolute h-full w-0.5 bg-[var(--foreground)] opacity-30"
+          style={{ left: `${asset.targetWeightPct}%` }}
+        />
+        {/* Current weight */}
+        <div
+          className="h-full rounded-full transition-all duration-300"
+          style={{
+            width: `${asset.currentWeightPct}%`,
+            backgroundColor: asset.color,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function DetailsContentV2() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { address, isConnected } = useAccount()
@@ -50,12 +123,9 @@ function DetailsContent() {
   const [showRebalanceConfirm, setShowRebalanceConfirm] = useState(false)
   const [mounted, setMounted] = useState(false)
 
-  const { holdings, values, allocations, drift, driftThreshold, allocationName, isLoading, refetch } = useVaultState(vaultAddress)
-  const { rebalance, isPending, isConfirming, isSuccess, error: rawRebalanceError } = useRebalance(vaultAddress)
+  const vaultState = useVaultStateV2(vaultAddress)
+  const { rebalance, isPending, isConfirming, isSuccess, error: rawRebalanceError } = useRebalanceV2(vaultAddress)
   const { estimateUsd } = useGasEstimate()
-  const { activities, isLoading: activitiesLoading } = useVaultActivity(vaultAddress)
-  const { overall: oracleHealth, isLoading: oracleLoading } = useOracleHealth()
-  const { price: btcPrice } = useBtcPrice()
 
   useEffect(() => {
     setMounted(true)
@@ -67,12 +137,6 @@ function DetailsContent() {
     const vaultParam = searchParams.get('vault')
     if (vaultParam) {
       setVaultAddress(vaultParam as Address)
-      return
-    }
-
-    const userVaults = getUserVaults(address)
-    if (userVaults.length > 0) {
-      setVaultAddress(userVaults[0].address)
     }
   }, [mounted, address, searchParams])
 
@@ -87,9 +151,9 @@ function DetailsContent() {
     else if (isConfirming) setRebalanceState('pending')
     else if (isSuccess) {
       setRebalanceState('success')
-      setTimeout(() => refetch(), 2000)
+      setTimeout(() => vaultState.refetch(), 2000)
     }
-  }, [isPending, isConfirming, isSuccess, refetch])
+  }, [isPending, isConfirming, isSuccess, vaultState])
 
   useEffect(() => {
     if (rawRebalanceError) {
@@ -123,15 +187,20 @@ function DetailsContent() {
     setRebalanceState('idle')
   }
 
-  const canRebalance = drift >= driftThreshold
-  const hasBalance = values.total > 0
+  const hasBalance = vaultState.totalValueUsd > 0
+
+  // Build allocation name from target weights
+  const allocationName = vaultState.assets
+    .filter(a => a.targetWeightPct > 0)
+    .map(a => `${a.targetWeightPct.toFixed(0)}% ${a.symbol}`)
+    .join(' / ')
 
   // Transaction states - minimal
   if (rebalanceState === 'success') {
     return (
       <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
         <p className="text-lg mb-2">Allocation restored</p>
-        <p className="text-sm text-[var(--muted)]">Back to {allocationName || 'target'}</p>
+        <p className="text-sm text-[var(--muted)]">Back to target weights</p>
       </div>
     )
   }
@@ -158,7 +227,7 @@ function DetailsContent() {
           {rebalanceState === 'confirming' ? 'Confirm in wallet' : 'Rebalancing'}
         </p>
         <p className="text-sm text-[var(--muted)]">
-          {rebalanceState === 'confirming' ? 'Approve the transaction' : 'Adjusting allocation'}
+          {rebalanceState === 'confirming' ? 'Approve the transaction' : 'Executing swaps...'}
         </p>
       </div>
     )
@@ -168,7 +237,7 @@ function DetailsContent() {
     <div className="flex flex-col min-h-[85vh]">
       {/* Back link */}
       <button
-        onClick={() => router.push('/portfolio')}
+        onClick={() => router.push(`/portfolio-v2?vault=${vaultAddress}`)}
         className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)] transition-colors"
       >
         ← Portfolio
@@ -181,7 +250,7 @@ function DetailsContent() {
           {/* Total Value Header */}
           <div className="mb-6">
             <p className="text-xs text-[var(--muted)] uppercase tracking-[0.15em] mb-2">Total Value</p>
-            <p className="text-3xl font-light tabular-nums">{isLoading ? '—' : formatUsd(values.total)}</p>
+            <p className="text-3xl font-light tabular-nums">{vaultState.isLoading ? '—' : formatUsd(vaultState.totalValueUsd)}</p>
           </div>
 
           {/* Holdings */}
@@ -190,65 +259,24 @@ function DetailsContent() {
             <div className="flex-1 h-px bg-[var(--border)]" />
           </div>
 
-          <div className="space-y-5">
-            {/* Bitcoin */}
-            <div className="flex justify-between items-baseline">
-              <div>
-                <span>Bitcoin</span>
-                <span className="text-[var(--foreground-secondary)] text-sm ml-2 tabular-nums">
-                  {isLoading ? '' : formatBtc(holdings.btc)}
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-lg tabular-nums">{isLoading ? '—' : formatUsd(values.btc)}</span>
-                <span className="text-sm text-[var(--muted)] ml-3 tabular-nums">
-                  {isLoading ? '' : `${allocations.current.btc.toFixed(1)}%`}
-                  {hasBalance && !isLoading && (
-                    <span className="opacity-50"> / {allocations.target.btc.toFixed(0)}%</span>
-                  )}
-                </span>
-              </div>
-            </div>
-
-            {/* USDC */}
-            <div className="flex justify-between items-baseline">
-              <div>
-                <span>USDC</span>
-                <span className="text-[var(--foreground-secondary)] text-sm ml-2 tabular-nums">
-                  {isLoading ? '' : Number(formatUnits(holdings.usdc, 6)).toFixed(2)}
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-lg tabular-nums">{isLoading ? '—' : formatUsd(values.usdc)}</span>
-                <span className="text-sm text-[var(--muted)] ml-3 tabular-nums">
-                  {isLoading ? '' : `${allocations.current.usdc.toFixed(1)}%`}
-                  {hasBalance && !isLoading && (
-                    <span className="opacity-50"> / {allocations.target.usdc.toFixed(0)}%</span>
-                  )}
-                </span>
-              </div>
-            </div>
+          <div className="space-y-4">
+            {vaultState.assets.map((asset) => (
+              <AssetRow
+                key={asset.assetId}
+                asset={asset}
+                needsRebalance={vaultState.needsRebalance}
+              />
+            ))}
           </div>
-
-          {/* Activity log */}
-          {hasBalance && (
-            <div className="mt-10">
-              <div className="flex items-center gap-4 mb-6">
-                <span className="text-xs text-[var(--muted)] uppercase tracking-[0.2em]">Activity</span>
-                <div className="flex-1 h-px bg-[var(--border)]" />
-              </div>
-              <ActivityLog activities={activities} isLoading={activitiesLoading} showCausality={true} />
-            </div>
-          )}
         </div>
 
         {/* Right column: Rules & Status */}
         <div>
           {/* Drift Status Header */}
           <div className="mb-6">
-            <p className="text-xs text-[var(--muted)] uppercase tracking-[0.15em] mb-2">Current Drift</p>
-            <p className={`text-3xl font-light tabular-nums ${canRebalance ? 'text-[var(--warning)]' : ''}`}>
-              {isLoading ? '—' : `${drift.toFixed(1)}%`}
+            <p className="text-xs text-[var(--muted)] uppercase tracking-[0.15em] mb-2">Portfolio Drift</p>
+            <p className={`text-3xl font-light tabular-nums ${vaultState.needsRebalance ? 'text-[var(--warning)]' : ''}`}>
+              {vaultState.isLoading ? '—' : `${vaultState.portfolioDriftPct.toFixed(1)}%`}
             </p>
           </div>
 
@@ -261,16 +289,22 @@ function DetailsContent() {
           <div className="space-y-4 mb-8">
             <div className="flex justify-between items-baseline">
               <span className="text-[var(--muted)]">Target allocation</span>
-              <span>{allocationName || '—'}</span>
+              <span className="text-sm">{allocationName || '—'}</span>
             </div>
             <div className="flex justify-between items-baseline">
               <span className="text-[var(--muted)]">Drift threshold</span>
-              <span className="tabular-nums">{driftThreshold}%</span>
+              <span className="tabular-nums">{formatDriftThreshold(vaultState.driftThresholdPct * 100)}</span>
+            </div>
+            <div className="flex justify-between items-baseline">
+              <span className="text-[var(--muted)]">Max drift asset</span>
+              <span className={vaultState.needsRebalance ? 'text-[var(--warning)]' : ''}>
+                {vaultState.maxDriftAsset ?? '—'}
+              </span>
             </div>
             <div className="flex justify-between items-baseline">
               <span className="text-[var(--muted)]">Status</span>
-              <span className={canRebalance ? 'text-[var(--warning)] font-medium' : 'text-[var(--muted)]'}>
-                {canRebalance ? 'Rebalance available' : 'No action needed'}
+              <span className={vaultState.needsRebalance ? 'text-[var(--warning)] font-medium' : 'text-[var(--muted)]'}>
+                {vaultState.needsRebalance ? 'Rebalance available' : 'No action needed'}
               </span>
             </div>
           </div>
@@ -283,7 +317,7 @@ function DetailsContent() {
 
           {hasBalance && (
             <div>
-              {canRebalance ? (
+              {vaultState.needsRebalance ? (
                 <button
                   onClick={handleRebalanceClick}
                   className="text-[var(--primary)] font-medium hover:opacity-80 transition-opacity"
@@ -298,18 +332,17 @@ function DetailsContent() {
             </div>
           )}
 
-          {/* Oracle and Vault info */}
-          <div className="mt-8 pt-6 border-t border-[var(--border)] space-y-3">
-            <OracleStatus health={oracleHealth} isLoading={oracleLoading} />
+          {/* Vault info */}
+          <div className="mt-8 pt-6 border-t border-[var(--border)]">
+            {vaultState.lastRebalanceAt && (
+              <p className="text-xs text-[var(--muted)] mb-2">
+                Last rebalanced: {vaultState.lastRebalanceAt.toLocaleDateString()}
+              </p>
+            )}
             {vaultAddress && (
-              <a
-                href={`https://basescan.org/address/${vaultAddress}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-[var(--muted)] opacity-40 tabular-nums tracking-wide hover:opacity-70 transition-opacity"
-              >
-                Vault: {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)} ↗
-              </a>
+              <p className="text-xs text-[var(--muted)] opacity-40 tabular-nums tracking-wide">
+                Vault: {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
+              </p>
             )}
           </div>
         </div>
@@ -321,10 +354,12 @@ function DetailsContent() {
         onClose={() => setShowRebalanceConfirm(false)}
         onConfirm={handleRebalanceConfirm}
         title="Rebalance portfolio"
-        description={`This will restore your allocation to ${allocationName || 'target'} by swapping assets.`}
+        description="This will restore your allocation to target weights by swapping assets through USDC."
         details={[
-          { label: 'Current drift', value: `${drift.toFixed(1)}%` },
-          { label: 'Network fee', value: estimateUsd(200000) },
+          { label: 'Current max drift', value: `${vaultState.portfolioDriftPct.toFixed(1)}%` },
+          { label: 'Max drift asset', value: vaultState.maxDriftAsset ?? '—' },
+          { label: 'Assets to rebalance', value: `${vaultState.assets.filter(a => a.driftPct > 0.5).length}` },
+          { label: 'Network fee', value: estimateUsd(300000) },
         ]}
         confirmText="Rebalance"
       />
@@ -332,14 +367,14 @@ function DetailsContent() {
   )
 }
 
-export default function DetailsPage() {
+export default function DetailsPageV2() {
   return (
     <Suspense fallback={
       <div className="flex flex-col min-h-[85vh] items-center justify-center">
         <span className="text-[var(--muted)]">—</span>
       </div>
     }>
-      <DetailsContent />
+      <DetailsContentV2 />
     </Suspense>
   )
 }

@@ -200,3 +200,130 @@ For security issues, see SECURITY.md.
 **Approved By:** _________________
 
 **Date:** _________________
+
+---
+
+## 8. v2 Integration Test Plan
+
+**Version:** v2
+**Last Updated:** 2026-01-22
+
+### 8.1 Prerequisites
+
+- [ ] MeezanFactoryV2 deployed to Base
+- [ ] Factory address updated in `lib/contracts-v2.ts`
+- [ ] All contract tests passing (280+)
+- [ ] Web build passes (`npm run build`)
+
+### 8.2 Frontend-to-Contract Flow Test
+
+#### Step 1: Vault Creation Flow
+
+| Test | Expected Result | Status |
+|------|-----------------|--------|
+| Navigate to `/setup-v2` | Shows portfolio templates | [ ] |
+| Select "Balanced" template | Pre-fills 40% BTC, 30% ETH, 10% SOL, 20% USDC | [ ] |
+| Proceed to weight screen | Shows allocation bar totaling 100% | [ ] |
+| Set drift threshold to "Standard" (5%) | 500 bps selected | [ ] |
+| Enter deposit amount | Amount validates against USDC balance | [ ] |
+| Click "Create portfolio vault" | Processing screen appears | [ ] |
+
+#### Step 2: Transaction Sequence
+
+| Transaction | Expected Behavior | Status |
+|-------------|-------------------|--------|
+| Factory.createVault | Wallet prompts for confirmation | [ ] |
+| | Transaction confirmed on-chain | [ ] |
+| | VaultV2Deployed event emitted | [ ] |
+| | Vault address extracted from event | [ ] |
+| Vault.acceptOwnership | Wallet prompts for confirmation | [ ] |
+| | User becomes vault owner | [ ] |
+| USDC.approve | Wallet prompts for confirmation | [ ] |
+| | Allowance set to deposit amount | [ ] |
+| Vault.deposit(stablecoinIndex, amount) | Wallet prompts for confirmation | [ ] |
+| | USDC transferred to vault | [ ] |
+| Vault.rebalance | Wallet prompts for confirmation | [ ] |
+| | Swaps executed | [ ] |
+| | Assets allocated to target weights | [ ] |
+
+#### Step 3: Portfolio View Verification
+
+| Check | Expected Result | Status |
+|-------|-----------------|--------|
+| Redirect to `/portfolio-v2?vault=0x...` | Portfolio page shows vault address | [ ] |
+| Total value displayed | Matches deposit amount (minus fees) | [ ] |
+| Allocation bar | Shows colors for each asset | [ ] |
+| Per-asset holdings | BTC, ETH, SOL, USDC values displayed | [ ] |
+| System status | "Max drift: X% · Threshold: 5% · No action needed" | [ ] |
+
+#### Step 4: Details View Verification
+
+| Check | Expected Result | Status |
+|-------|-----------------|--------|
+| Click "Details" | Navigates to `/details-v2?vault=0x...` | [ ] |
+| Per-asset cards | Target %, Current %, Drift % displayed | [ ] |
+| Max drift asset | Highlighted with warning color if > threshold | [ ] |
+| Visual weight bars | Show current vs target position | [ ] |
+| Rebalance status | "No action needed" if below threshold | [ ] |
+
+### 8.3 Rebalance Test
+
+| Test | Expected Result | Status |
+|------|-----------------|--------|
+| Wait for price movement (or simulate) | Portfolio drift increases | [ ] |
+| Drift exceeds threshold | "Rebalance available" appears | [ ] |
+| Click "Rebalance now" | Confirmation dialog shows fee estimate | [ ] |
+| Confirm rebalance | Transaction sequence executes | [ ] |
+| Post-rebalance | Drift returns to near-zero | [ ] |
+
+### 8.4 Withdraw Test
+
+| Test | Expected Result | Status |
+|------|-----------------|--------|
+| Click "Withdraw" on portfolio | Confirmation dialog appears | [ ] |
+| Shows total value and asset count | Accurate values displayed | [ ] |
+| Confirm withdrawal | Transaction executes | [ ] |
+| All assets returned | BTC, ETH, SOL, USDC in wallet | [ ] |
+| Vault balance | Zero for all assets | [ ] |
+
+### 8.5 Edge Cases
+
+| Test | Expected Result | Status |
+|------|-----------------|--------|
+| Attempt create with existing config | Redirects to existing vault | [ ] |
+| Insufficient USDC balance | Error shown, button disabled | [ ] |
+| Transaction rejection | Error screen with retry option | [ ] |
+| Network disconnect mid-flow | Graceful error handling | [ ] |
+| Wrong network connected | Network switch prompt | [ ] |
+
+### 8.6 Security Verification
+
+| Check | Expected Result | Status |
+|-------|-----------------|--------|
+| Factory address hardcoded | Not from URL params | [ ] |
+| All addresses from security.ts | Verified in code | [ ] |
+| Chain locked to Base (8453) | Rejects other chains | [ ] |
+| Transaction hashes linkable | Basescan links work | [ ] |
+| Approval cleared after use | No residual allowances | [ ] |
+
+### 8.7 Test Results Summary
+
+| Phase | Passed | Failed | Notes |
+|-------|--------|--------|-------|
+| Vault Creation | / | / | |
+| Transaction Flow | / | / | |
+| Portfolio View | / | / | |
+| Details View | / | / | |
+| Rebalance | / | / | |
+| Withdraw | / | / | |
+| Edge Cases | / | / | |
+| Security | / | / | |
+
+**v2 Integration Test Sign-Off:**
+
+- [ ] All frontend tests passing
+- [ ] Real funds test complete (small amount)
+- [ ] No security issues identified
+
+**Tester:** _________________
+**Date:** _________________

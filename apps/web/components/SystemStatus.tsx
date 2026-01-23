@@ -104,7 +104,7 @@ export function SystemStatusCompact({
       <div className="flex items-center justify-center gap-2">
         <span className={`w-1.5 h-1.5 rounded-full ${needsRebalance ? 'bg-[var(--warning)]' : 'bg-emerald-500 opacity-70'}`} />
         {needsRebalance ? (
-          <p className="text-sm text-[var(--warning)]">
+          <p className="text-base font-medium text-[var(--warning)]">
             Rebalance available
           </p>
         ) : (
@@ -116,7 +116,7 @@ export function SystemStatusCompact({
 
       {/* Time context */}
       {timeAgo && (
-        <p className="text-[10px] text-[var(--muted)] opacity-50 tracking-wide">
+        <p className="text-xs text-[var(--muted)] opacity-50 tracking-wide">
           Checked {timeAgo}
         </p>
       )}

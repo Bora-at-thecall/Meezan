@@ -267,29 +267,84 @@ export function useDeposit(vaultAddress: Address | null) {
 
 // Hook to withdraw all
 export function useWithdraw(vaultAddress: Address | null) {
-  const { writeContract, data: hash, isPending, error } = useWriteContract()
+  const { writeContractAsync, data: hash, isPending, error, reset } = useWriteContract()
+  const { chain } = useAccount()
+  const [localError, setLocalError] = useState<Error | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+  const { isLoading: isConfirming, isSuccess, error: receiptError } = useWaitForTransactionReceipt({
     hash,
   })
 
-  const withdraw = () => {
-    if (!vaultAddress) return
+  // Combine errors from both write and receipt
+  const combinedError = error || receiptError || localError
 
-    writeContract({
-      address: vaultAddress,
-      abi: VAULT_ABI,
-      functionName: 'withdrawAll',
-    })
+  // Check if on correct network
+  const isWrongNetwork = chain?.id !== 8453
+
+  // Log state changes
+  useEffect(() => {
+    console.log('useWithdraw state:', { hash, isPending, isSubmitting, isConfirming, isSuccess, chainId: chain?.id, error: combinedError?.message })
+  }, [hash, isPending, isSubmitting, isConfirming, isSuccess, chain?.id, combinedError])
+
+  const withdraw = async () => {
+    if (!vaultAddress) {
+      console.error('useWithdraw: No vault address provided')
+      setLocalError(new Error('No vault address'))
+      return
+    }
+
+    // Check network BEFORE attempting transaction
+    if (chain?.id !== 8453) {
+      console.error('useWithdraw: Wrong network! Expected Base (8453), got', chain?.id)
+      setLocalError(new Error('Please switch to Base network in your wallet'))
+      return
+    }
+
+    // Reset any previous errors and state
+    setLocalError(null)
+    reset()
+    setIsSubmitting(true)
+
+    console.log('useWithdraw: Calling withdrawAllToUSDC on', vaultAddress, 'chainId:', chain?.id)
+
+    try {
+      const txHash = await writeContractAsync({
+        address: vaultAddress,
+        abi: VAULT_ABI,
+        functionName: 'withdrawAllToUSDC',
+        chainId: 8453, // Base mainnet
+      })
+      console.log('useWithdraw: TX submitted with hash', txHash)
+    } catch (err: any) {
+      console.error('useWithdraw: TX failed', err)
+      // Handle port disconnected error specifically
+      const msg = err?.message || ''
+      if (msg.includes('Port disconnected') || msg.includes('disconnected')) {
+        setLocalError(new Error('Wallet connection lost. Please check your wallet for any pending transactions, then refresh the page.'))
+      } else if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('denied')) {
+        setLocalError(new Error('Transaction cancelled'))
+      } else {
+        setLocalError(err as Error)
+      }
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return {
     withdraw,
-    isPending,
+    isPending: isPending || isSubmitting,
     isConfirming,
     isSuccess,
-    error,
+    error: combinedError,
     hash,
+    isWrongNetwork,
+    reset: () => {
+      reset()
+      setLocalError(null)
+      setIsSubmitting(false)
+    },
   }
 }
 
@@ -386,19 +441,71 @@ export function useGasEstimate() {
 
 // Hook to get user's USDC balance
 export function useUsdcBalance() {
-  const { address } = useAccount()
+  const { address, isConnected, chain } = useAccount()
+  const [directBalance, setDirectBalance] = useState<bigint | null>(null)
 
-  const { data: balance, refetch } = useReadContract({
+  // Direct RPC call for debugging
+  useEffect(() => {
+    if (!address) return
+
+    const fetchDirect = async () => {
+      try {
+        // Direct fetch to RPC
+        const response = await fetch('https://mainnet.base.org', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'eth_call',
+            params: [{
+              to: CONTRACTS.usdc,
+              data: `0x70a08231000000000000000000000000${address.slice(2)}` // balanceOf(address)
+            }, 'latest']
+          })
+        })
+        const data = await response.json()
+        console.log('[useUsdcBalance] DIRECT RPC response:', data)
+        if (data.result) {
+          const bal = BigInt(data.result)
+          console.log('[useUsdcBalance] DIRECT balance:', bal.toString(), 'formatted:', formatUnits(bal, 6))
+          setDirectBalance(bal)
+        }
+      } catch (err) {
+        console.error('[useUsdcBalance] DIRECT RPC error:', err)
+      }
+    }
+
+    fetchDirect()
+  }, [address])
+
+  console.log('[useUsdcBalance] address:', address, 'isConnected:', isConnected, 'chainId:', chain?.id, 'USDC contract:', CONTRACTS.usdc)
+
+  const { data: balance, refetch, isLoading, isError, isFetching, error } = useReadContract({
     address: CONTRACTS.usdc,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
     args: address ? [address] : undefined,
-    query: { enabled: !!address },
+    chainId: 8453, // Explicitly use Base mainnet
+    query: {
+      enabled: !!address,
+      retry: 5,
+      retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 10000),
+      staleTime: 5_000,
+      gcTime: 60_000,
+    },
   })
 
+  console.log('[useUsdcBalance] wagmi balance:', balance?.toString(), 'directBalance:', directBalance?.toString(), 'isLoading:', isLoading, 'isFetching:', isFetching, 'isError:', isError, 'error:', error)
+
+  // Use direct balance if wagmi returns 0 but direct call got a value
+  const finalBalance = (balance === BigInt(0) && directBalance && directBalance > BigInt(0)) ? directBalance : (balance ?? BigInt(0))
+
   return {
-    balance: balance ?? BigInt(0),
-    formatted: balance ? formatUnits(balance, 6) : '0',
+    balance: finalBalance,
+    formatted: finalBalance ? formatUnits(finalBalance, 6) : '0',
+    isLoading: isLoading || isFetching,
+    isError,
     refetch,
   }
 }

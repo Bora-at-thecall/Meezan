@@ -33,7 +33,7 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline'", // Required for Tailwind
       "img-src 'self' data: https:",
       "font-src 'self'",
-      "connect-src 'self' https://*.base.org https://*.llamarpc.com wss://*.walletconnect.com https://*.walletconnect.com https://*.coinbase.com wss://*.coinbase.com",
+      "connect-src *",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'"

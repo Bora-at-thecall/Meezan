@@ -122,4 +122,60 @@ contract MockSwapRouter is ISwapRouter {
 
         return amountIn;
     }
+
+    /**
+     * @notice Simulate exactInputSingle swap (sell exact amount of input token)
+     * @dev Calculates amountOut based on exchange rate and token direction
+     */
+    function exactInputSingle(ExactInputSingleParams calldata params)
+        external
+        payable
+        override
+        returns (uint256 amountOut)
+    {
+        lastTokenIn = params.tokenIn;
+        lastTokenOut = params.tokenOut;
+        lastAmountIn = params.amountIn;
+
+        uint8 tokenInDecimals = IERC20Metadata(params.tokenIn).decimals();
+        uint8 tokenOutDecimals = IERC20Metadata(params.tokenOut).decimals();
+
+        // Determine direction and calculate amountOut
+        if (params.tokenIn == wbtcToken && params.tokenOut == usdcToken) {
+            // Selling WBTC for USDC
+            // amountOut (USDC) = amountIn (WBTC) * usdcPerWbtc / 1e18
+            amountOut = (params.amountIn * usdcPerWbtc) / 1e18;
+            // Adjust for decimal difference (WBTC=8, USDC=6)
+            if (tokenInDecimals > tokenOutDecimals) {
+                amountOut = amountOut / (10 ** (tokenInDecimals - tokenOutDecimals));
+            } else if (tokenOutDecimals > tokenInDecimals) {
+                amountOut = amountOut * (10 ** (tokenOutDecimals - tokenInDecimals));
+            }
+        } else if (params.tokenIn == usdcToken && params.tokenOut == wbtcToken) {
+            // Selling USDC for WBTC
+            // amountOut (WBTC) = amountIn (USDC) * wbtcPerUsdc / 1e18
+            amountOut = (params.amountIn * wbtcPerUsdc) / 1e18;
+            // Adjust for decimal difference (USDC=6, WBTC=8)
+            if (tokenInDecimals > tokenOutDecimals) {
+                amountOut = amountOut / (10 ** (tokenInDecimals - tokenOutDecimals));
+            } else if (tokenOutDecimals > tokenInDecimals) {
+                amountOut = amountOut * (10 ** (tokenOutDecimals - tokenInDecimals));
+            }
+        } else {
+            revert("Unknown token pair");
+        }
+
+        lastAmountOut = amountOut;
+
+        // Check slippage
+        require(amountOut >= params.amountOutMinimum, "Too little received");
+
+        // Transfer tokenIn from caller to this contract
+        IERC20(params.tokenIn).safeTransferFrom(msg.sender, address(this), params.amountIn);
+
+        // Transfer tokenOut to recipient
+        IERC20(params.tokenOut).safeTransfer(params.recipient, amountOut);
+
+        return amountOut;
+    }
 }

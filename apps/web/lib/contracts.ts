@@ -197,6 +197,15 @@ export const VAULT_ABI = [
     ],
   },
   {
+    name: 'withdrawAllToUSDC',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [
+      { name: 'totalUsdcWithdrawn', type: 'uint256' },
+    ],
+  },
+  {
     name: 'rebalance',
     type: 'function',
     stateMutability: 'nonpayable',

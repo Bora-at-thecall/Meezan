@@ -268,3 +268,58 @@ USDC: 20%  — Volatility buffer, rebalancing fuel
 - `docs/HNWI_PORTFOLIO_RESEARCH.md` — Full research report with stress scenarios
 
 ---
+
+## 2026-01-22: v2 Execution Strategy — LOCKED
+
+**Decision:** Finalize and lock the v2 swap execution strategy. No further alternatives will be considered without explicit founder decision.
+
+### Execution Model (FINAL)
+
+| Component | Decision |
+|-----------|----------|
+| Execution style | Atomic all-or-nothing per rebalance call |
+| Swap ordering | Two-phase: sells first (index order), then buys (index order) |
+| Subset selection | None — all assets above dust threshold processed |
+| Convergence model | Progressive over multiple calls if needed |
+| Intermediary | USDC for all swaps |
+| Failure mode | Fail-closed (any failure reverts entire transaction) |
+
+### Hard Bounds (FINAL)
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| MAX_SWAPS_PER_REBALANCE | 18 | 9 sells + 9 buys for 10 assets |
+| MIN_SWAP_USD | $1 | Prevent dust swaps |
+| Slippage range | 0.1% - 5% | Per-swap enforcement |
+| Default slippage | 1% | Balance between execution and MEV protection |
+
+### Security Review Outcome
+
+Formal execution-specific security review completed. **No critical issues found.**
+
+| Risk Area | Status |
+|-----------|--------|
+| Multi-leg ordering | Sound |
+| USDC balance between phases | Safe |
+| MEV attack surface | Bounded by slippage (accepted) |
+| Oracle coordination | Negligible risk |
+| Approval safety | Correct |
+| Withdrawal safety | Always available |
+| Gas exhaustion | Benign failure |
+| Partial convergence | Progressive convergence acceptable |
+
+### Documentation
+
+- `docs/V2_EXECUTION_DESIGN.md` — Implementation specification (LOCKED)
+- `docs/V2_EXECUTION_REVIEW_FINAL.md` — Security review (FINAL)
+
+### Change Control
+
+**This execution strategy is now LOCKED.**
+
+Further changes require:
+1. Explicit founder decision
+2. New security review
+3. Updated audit scope
+
+---

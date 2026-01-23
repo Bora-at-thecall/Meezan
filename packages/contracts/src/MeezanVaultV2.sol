@@ -40,6 +40,7 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
     uint16 public constant MIN_SLIPPAGE_BPS = 10;     // 0.1%
     uint16 public constant MAX_SLIPPAGE_BPS = 500;    // 5%
     uint16 public constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
+    uint8 public constant MAX_SWAPS_PER_REBALANCE = 18; // Max swaps: 9 sells + 9 buys
 
     // ============ Errors ============
 
@@ -68,6 +69,8 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
     error NotPendingOwner();
     error CannotRescueVaultToken();
     error InvalidAssetIndex();
+    error SlippageExceeded();
+    error InsufficientBalanceForSwap();
 
     // ============ Events ============
 
@@ -86,6 +89,20 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         uint16 portfolioDriftBps,
         int256[] deltas,
         uint64 timestamp
+    );
+
+    event Rebalanced(
+        address indexed caller,
+        uint16 preDriftBps,
+        uint8 swapsExecuted,
+        uint64 timestamp
+    );
+
+    event SwapExecuted(
+        uint8 indexed assetIndex,
+        bool isSell,
+        uint256 assetAmount,
+        uint256 usdcAmount
     );
 
     // ============ Structs ============
@@ -149,19 +166,22 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
      * @param _swapRouter Uniswap V3 SwapRouter address
      * @param _stablecoin Address of stablecoin (must be in assets array)
      * @param _driftThresholdBps Drift threshold in basis points (200-2000)
+     * @param _owner Address of vault owner (set immediately, no acceptance required)
      */
     constructor(
         AssetConfig[] memory assets,
         address _swapRouter,
         address _stablecoin,
-        uint16 _driftThresholdBps
+        uint16 _driftThresholdBps,
+        address _owner
     ) {
         // Validate asset count (INV-03)
         if (assets.length < MIN_ASSETS) revert TooFewAssets();
         if (assets.length > MAX_ASSETS) revert TooManyAssets();
 
-        // Validate swap router
+        // Validate swap router and owner
         if (_swapRouter == address(0)) revert ZeroAddress();
+        if (_owner == address(0)) revert ZeroAddress();
 
         // Validate drift threshold (INV-19)
         if (_driftThresholdBps < MIN_DRIFT_BPS || _driftThresholdBps > MAX_DRIFT_BPS) {
@@ -228,9 +248,11 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         driftThresholdBps = _driftThresholdBps;
         swapRouter = ISwapRouter(_swapRouter);
 
-        // Set initial mutable state
-        owner = msg.sender;
+        // Set initial mutable state (owner is set directly, no acceptance required)
+        owner = _owner;
         slippageBps = DEFAULT_SLIPPAGE_BPS;
+
+        emit OwnershipTransferred(address(0), _owner);
     }
 
     // ============ View Functions: Asset Configuration ============
@@ -415,6 +437,42 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     /// @notice Deposit a specific asset
     function deposit(uint8 assetIndex, uint256 amount) external onlyOwner whenNotPaused {
+        _deposit(assetIndex, amount);
+    }
+
+    /// @notice Deposit stablecoin and immediately rebalance in a single transaction
+    /// @dev Combines deposit + rebalance into one user action for better UX
+    /// @param assetIndex Index of asset to deposit (typically stablecoin)
+    /// @param amount Amount to deposit
+    function depositAndRebalance(uint8 assetIndex, uint256 amount) external onlyOwner nonReentrant whenNotPaused {
+        // Deposit the asset
+        _deposit(assetIndex, amount);
+
+        // Rebalance if needed (will buy BTC/ETH from USDC)
+        // Skip drift threshold check - user explicitly wants to allocate
+        uint256 totalUsd = _totalUsdValue();
+        if (totalUsd == 0) return; // Nothing to rebalance
+
+        // Calculate deltas and execute swaps
+        int256[] memory deltas = new int256[](assetCount);
+        for (uint8 i = 0; i < assetCount; i++) {
+            uint256 currentUsd = _assetUsdValue(i);
+            uint256 targetUsd = Math.mulDiv(totalUsd, _targetWeightsBps[i], BPS_DENOMINATOR);
+            deltas[i] = int256(currentUsd) - int256(targetUsd);
+        }
+
+        // Execute swaps (sells overweight, buys underweight)
+        uint8 swapsExecuted = _executeRebalanceSwaps(deltas);
+
+        // Update timestamp
+        lastRebalanceAt = uint64(block.timestamp);
+
+        // Emit completion event
+        emit Rebalanced(msg.sender, portfolioDriftBps(), swapsExecuted, uint64(block.timestamp));
+    }
+
+    /// @notice Internal deposit logic
+    function _deposit(uint8 assetIndex, uint256 amount) internal {
         if (assetIndex >= assetCount) revert InvalidAssetIndex();
         if (amount == 0) revert ZeroAmount();
 
@@ -513,12 +571,12 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         emit TokenRescued(token, balance);
     }
 
-    // ============ Rebalance (Stub - No Swaps in Phase 1) ============
+    // ============ Rebalance with Swap Execution ============
 
     /**
-     * @notice Calculate and emit rebalance intent (INV-11)
-     * @dev Phase 1: Only computes required swaps and emits event. Does NOT execute swaps.
-     *      Swap execution will be added in Phase 2.
+     * @notice Execute portfolio rebalance with swap execution (INV-11, INV-12)
+     * @dev Two-phase execution: sell overweight → USDC, then USDC → buy underweight
+     *      Fail-closed: any failure reverts entire transaction
      */
     function rebalance() external onlyOwnerOrExecutor nonReentrant whenNotPaused {
         // Verify drift threshold (INV-11)
@@ -544,13 +602,176 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
             deltas[i] = int256(currentUsd) - int256(targetUsd);
         }
 
+        // Execute swaps
+        uint8 swapsExecuted = _executeRebalanceSwaps(deltas);
+
         // Update timestamp
         lastRebalanceAt = uint64(block.timestamp);
 
-        // Emit intent (actual swaps to be implemented in Phase 2)
-        emit RebalanceIntent(msg.sender, drift, deltas, uint64(block.timestamp));
+        // Emit completion event
+        emit Rebalanced(msg.sender, drift, swapsExecuted, uint64(block.timestamp));
+    }
 
-        // NOTE: Phase 2 will add _executeRebalanceSwaps(deltas) here
+    /**
+     * @notice Execute rebalance swaps in two phases
+     * @param deltas USD deltas per asset (positive = overweight, negative = underweight)
+     * @return swapsExecuted Number of swaps executed
+     * @dev Phase 1: Sell overweight assets → USDC
+     *      Phase 2: USDC → Buy underweight assets
+     */
+    function _executeRebalanceSwaps(int256[] memory deltas) internal returns (uint8 swapsExecuted) {
+        // Phase 1: Sell all overweight assets to USDC
+        for (uint8 i = 0; i < assetCount; i++) {
+            if (i == stablecoinIndex) continue; // Skip USDC itself
+            if (deltas[i] <= int256(MIN_SWAP_USD)) continue; // Not overweight or below dust
+
+            if (swapsExecuted >= MAX_SWAPS_PER_REBALANCE) break;
+
+            _executeSellToUsdc(i, uint256(deltas[i]));
+            swapsExecuted++;
+        }
+
+        // Phase 2: Buy all underweight assets from USDC
+        for (uint8 i = 0; i < assetCount; i++) {
+            if (i == stablecoinIndex) continue; // Skip USDC itself
+            if (deltas[i] >= -int256(MIN_SWAP_USD)) continue; // Not underweight or below dust
+
+            if (swapsExecuted >= MAX_SWAPS_PER_REBALANCE) break;
+
+            _executeBuyFromUsdc(i, uint256(-deltas[i]));
+            swapsExecuted++;
+        }
+
+        return swapsExecuted;
+    }
+
+    /**
+     * @notice Sell asset to USDC (exactOutputSingle)
+     * @param assetIndex Index of asset to sell
+     * @param usdValue USD value to shift (in 1e18 precision)
+     * @dev Uses exactOutputSingle to get precise USDC amount
+     */
+    function _executeSellToUsdc(uint8 assetIndex, uint256 usdValue) internal {
+        address token = _assets[assetIndex];
+        uint24 fee = _poolFees[assetIndex];
+
+        // Get prices (validates oracle freshness)
+        uint256 assetPrice = _getPrice(_priceFeeds[assetIndex], _getStalenessForAsset(assetIndex));
+        uint256 stablePrice = _getPrice(_priceFeeds[stablecoinIndex], MAX_PRICE_STALENESS_STABLE);
+
+        // Calculate USDC amount to receive (target output)
+        // usdcToReceive = usdValue * 10^stablecoinDecimals / (stablePrice * 10^(18 - feedDecimals))
+        uint256 usdcToReceive = Math.mulDiv(
+            usdValue,
+            10 ** _tokenDecimals[stablecoinIndex],
+            Math.mulDiv(stablePrice, USD_PRECISION, 10 ** _feedDecimals[stablecoinIndex])
+        );
+
+        if (usdcToReceive == 0) return; // Skip zero amount
+
+        // Calculate oracle-based asset amount to sell
+        // tokensToSell = usdValue * 10^assetDecimals / (assetPrice * 10^(18 - feedDecimals))
+        uint256 oracleTokensToSell = Math.mulDiv(
+            usdValue,
+            10 ** _tokenDecimals[assetIndex],
+            Math.mulDiv(assetPrice, USD_PRECISION, 10 ** _feedDecimals[assetIndex])
+        );
+
+        // Add slippage buffer for maximum input
+        uint256 maxTokensIn = Math.mulDiv(oracleTokensToSell, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
+
+        // Check balance
+        uint256 available = IERC20(token).balanceOf(address(this));
+        if (available < maxTokensIn) revert InsufficientBalanceForSwap();
+
+        // Approve router (INV-08: approve exact max amount)
+        IERC20(token).forceApprove(address(swapRouter), maxTokensIn);
+
+        // Execute swap: sell asset → get USDC
+        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+            tokenIn: token,
+            tokenOut: _assets[stablecoinIndex],
+            fee: fee,
+            recipient: address(this),
+            amountOut: usdcToReceive,
+            amountInMaximum: maxTokensIn,
+            sqrtPriceLimitX96: 0
+        });
+
+        uint256 actualIn = swapRouter.exactOutputSingle(params);
+
+        // Revoke approval (INV-08: no residual approvals)
+        IERC20(token).forceApprove(address(swapRouter), 0);
+
+        // Verify slippage (belt and suspenders - router should enforce this)
+        if (actualIn > maxTokensIn) revert SlippageExceeded();
+
+        emit SwapExecuted(assetIndex, true, actualIn, usdcToReceive);
+    }
+
+    /**
+     * @notice Buy asset from USDC (exactOutputSingle)
+     * @param assetIndex Index of asset to buy
+     * @param usdValue USD value to shift (in 1e18 precision)
+     * @dev Uses exactOutputSingle to get precise asset amount
+     */
+    function _executeBuyFromUsdc(uint8 assetIndex, uint256 usdValue) internal {
+        address token = _assets[assetIndex];
+        uint24 fee = _poolFees[assetIndex];
+        address stablecoin = _assets[stablecoinIndex];
+
+        // Get prices (validates oracle freshness)
+        uint256 assetPrice = _getPrice(_priceFeeds[assetIndex], _getStalenessForAsset(assetIndex));
+        uint256 stablePrice = _getPrice(_priceFeeds[stablecoinIndex], MAX_PRICE_STALENESS_STABLE);
+
+        // Calculate asset amount to receive (target output)
+        // tokensToBuy = usdValue * 10^assetDecimals / (assetPrice * 10^(18 - feedDecimals))
+        uint256 tokensToBuy = Math.mulDiv(
+            usdValue,
+            10 ** _tokenDecimals[assetIndex],
+            Math.mulDiv(assetPrice, USD_PRECISION, 10 ** _feedDecimals[assetIndex])
+        );
+
+        if (tokensToBuy == 0) return; // Skip zero amount
+
+        // Calculate oracle-based USDC cost
+        // usdcCost = usdValue * 10^stablecoinDecimals / (stablePrice * 10^(18 - feedDecimals))
+        uint256 oracleUsdcCost = Math.mulDiv(
+            usdValue,
+            10 ** _tokenDecimals[stablecoinIndex],
+            Math.mulDiv(stablePrice, USD_PRECISION, 10 ** _feedDecimals[stablecoinIndex])
+        );
+
+        // Add slippage buffer for maximum input
+        uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
+
+        // Check balance
+        uint256 available = IERC20(stablecoin).balanceOf(address(this));
+        if (available < maxUsdcIn) revert InsufficientBalanceForSwap();
+
+        // Approve router (INV-08: approve exact max amount)
+        IERC20(stablecoin).forceApprove(address(swapRouter), maxUsdcIn);
+
+        // Execute swap: spend USDC → get asset
+        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+            tokenIn: stablecoin,
+            tokenOut: token,
+            fee: fee,
+            recipient: address(this),
+            amountOut: tokensToBuy,
+            amountInMaximum: maxUsdcIn,
+            sqrtPriceLimitX96: 0
+        });
+
+        uint256 actualIn = swapRouter.exactOutputSingle(params);
+
+        // Revoke approval (INV-08: no residual approvals)
+        IERC20(stablecoin).forceApprove(address(swapRouter), 0);
+
+        // Verify slippage (belt and suspenders - router should enforce this)
+        if (actualIn > maxUsdcIn) revert SlippageExceeded();
+
+        emit SwapExecuted(assetIndex, false, tokensToBuy, actualIn);
     }
 
     /**

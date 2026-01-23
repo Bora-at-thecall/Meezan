@@ -302,6 +302,57 @@ contract MeezanVault is ReentrancyGuard, Pausable {
         }
     }
 
+    /// @notice Converts all holdings to USDC and withdraws to owner
+    /// @return totalUsdcWithdrawn The total USDC amount sent to the owner
+    function withdrawAllToUSDC() external onlyOwner nonReentrant returns (uint256 totalUsdcWithdrawn) {
+        uint256 amountA = tokenA.balanceOf(address(this));
+        uint256 amountB = tokenB.balanceOf(address(this));
+
+        // If we have BTC, swap it all to USDC first
+        if (amountA > 0) {
+            // Get oracle prices for slippage calculation
+            uint256 priceA = _getPrice(priceFeedA, MAX_PRICE_STALENESS);
+            uint256 priceB = _getPrice(priceFeedB, MAX_PRICE_STALENESS_STABLE);
+
+            // Calculate expected USDC output based on oracle
+            // First get USD value of BTC
+            uint256 btcUsdValue = Math.mulDiv(amountA, priceA, 10 ** feedDecimalsA);
+            // Convert USD value to USDC amount
+            uint256 expectedUsdc = Math.mulDiv(btcUsdValue, 10 ** tokenDecimalsB, priceB);
+
+            // Apply slippage tolerance for minimum output
+            uint256 minUsdcOut = Math.mulDiv(expectedUsdc, BPS_DENOMINATOR - slippageBps, BPS_DENOMINATOR);
+
+            // Approve router to spend BTC
+            tokenA.forceApprove(address(swapRouter), amountA);
+
+            // Swap all BTC to USDC using exactInputSingle (we want to sell ALL BTC)
+            ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+                tokenIn: address(tokenA),
+                tokenOut: address(tokenB),
+                fee: poolFee,
+                recipient: address(this),
+                amountIn: amountA,
+                amountOutMinimum: minUsdcOut,
+                sqrtPriceLimitX96: 0
+            });
+
+            uint256 usdcReceived = swapRouter.exactInputSingle(params);
+
+            // Clear approval
+            tokenA.forceApprove(address(swapRouter), 0);
+
+            emit Withdraw(msg.sender, address(tokenA), amountA);
+        }
+
+        // Now withdraw all USDC (original + swapped)
+        totalUsdcWithdrawn = tokenB.balanceOf(address(this));
+        if (totalUsdcWithdrawn > 0) {
+            tokenB.safeTransfer(msg.sender, totalUsdcWithdrawn);
+            emit Withdraw(msg.sender, address(tokenB), totalUsdcWithdrawn);
+        }
+    }
+
     function rebalance() external onlyOwnerOrExecutor nonReentrant whenNotPaused {
         (uint256 valueA, uint256 valueB) = _getUsdValues();
         uint256 totalUsd = valueA + valueB;
