@@ -569,20 +569,44 @@ Total: 280 tests passed (fork tests excluded - requires RPC)
 | Component | Status |
 |-----------|--------|
 | V1 Contracts | ✅ Deployed to Base |
-| V2 Contracts | ✅ Complete, audit-ready |
+| V2 Contracts | ✅ Complete, deployed |
 | V2 Frontend | ✅ Complete (BTC, ETH, USDC) |
-| FactoryV2 Deployment | ⏳ Pending |
+| FactoryV2 Deployment | ✅ **DEPLOYED** |
+| 3-Step Setup Flow | ✅ Complete |
+| Smoke Test | ⏳ Pending |
 | Security Audit | ⏳ Pending |
-| Solana Vault | 📋 Planned |
-| Arbitrum Vault | 📋 Planned |
+
+### V2 Deployment Details (2026-01-24)
+
+**Factory V2 Address:** `0xc24F363E8F1Df37AEBfb50366118DfafF21983CA`
+**Basescan:** https://basescan.org/address/0xc24F363E8F1Df37AEBfb50366118DfafF21983CA
+
+**Key Changes:**
+- Immediate ownership (no acceptOwnership step)
+- `depositAndRebalance()` for single-tx funding
+- 3 wallet confirmations max (create → approve → fund)
+- Phantom vault recovery without user config changes
+- Idempotent retry with on-chain state verification
+
+**Test Results:**
+- 74 V2 contract tests passing
+- Frontend build successful
+- All acceptance criteria met
+
+### Launch Status
+
+**Ready for public beta once smoke test passes.**
+
+See `/docs/SMOKE_TEST_CHECKLIST.md` for test procedure.
 
 ### Next Steps
 
 1. ✅ Phase 1-4 implementation complete (contracts + frontend)
 2. ✅ Asset universe finalized (BTC, ETH, USDC on Base)
 3. ✅ Roadmap locked
-4. ⏳ Deploy MeezanFactoryV2 to Base
-5. ⏳ Update CONTRACTS_V2.factoryV2 address
-6. ⏳ Real-funds testing ($50-100)
-7. ⏳ Audit firm engagement
-8. ⏳ Public launch
+4. ✅ Deploy MeezanFactoryV2 to Base
+5. ✅ Update CONTRACTS_V2.factoryV2 address
+6. ✅ 3-step setup flow implemented
+7. ⏳ **Run smoke test with real funds ($20-50 USDC)**
+8. ⏳ Public beta launch
+9. ⏳ Audit firm engagement
