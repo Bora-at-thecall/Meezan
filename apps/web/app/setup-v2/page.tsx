@@ -5,6 +5,9 @@ import { useRouter } from 'next/navigation'
 import { useAccount, useWriteContract, useWaitForTransactionReceipt, useChainId, useSwitchChain } from 'wagmi'
 import { type Hash, type Address } from 'viem'
 import { base } from 'wagmi/chains'
+
+// Base mainnet chain ID
+const BASE_CHAIN_ID = 8453
 import { Button } from '@/components/Button'
 import { Card } from '@/components/Card'
 import {
@@ -20,7 +23,7 @@ import {
   type AssetId,
   type PortfolioTemplate,
 } from '@/lib/assets'
-import { useUsdcBalance, useGasEstimate } from '@/lib/hooks'
+import { useUsdcBalance, useEthBalance, useGasEstimate } from '@/lib/hooks'
 import { checkExistingVaultV2, CONTRACTS_V2, getLatestVaultV2 } from '@/lib/contracts-v2'
 import {
   setupOrchestratorV2,
@@ -44,6 +47,8 @@ type SetupStep =
 export default function SetupV2Page() {
   const router = useRouter()
   const { address, isConnected } = useAccount()
+  const chainId = useChainId()
+  const { switchChain, isPending: isSwitchingChain } = useSwitchChain()
 
   // UI state
   const [setupStep, setSetupStep] = useState<SetupStep>('choose-structure')
@@ -176,7 +181,7 @@ export default function SetupV2Page() {
   useEffect(() => {
     if (txState?.step === 'complete' && txState.vaultAddress) {
       setTimeout(() => {
-        router.push(`/portfolio-v2?vault=${txState.vaultAddress}`)
+        router.push('/portfolio')
       }, 1500)
     }
   }, [txState, router])
@@ -200,6 +205,10 @@ export default function SetupV2Page() {
 
   // Balance check
   const { formatted: usdcBalance, isLoading: balanceLoading, isError: balanceError, refetch: refetchBalance } = useUsdcBalance()
+  const { hasEnoughGas, hasLowGas, hasNoGas, formatted: ethBalance } = useEthBalance()
+
+  // Track if user clicked Max with low gas
+  const [showGasWarning, setShowGasWarning] = useState(false)
 
   // ============================================
   // HANDLERS
@@ -276,6 +285,7 @@ export default function SetupV2Page() {
     if (/^\d*\.?\d*$/.test(value)) {
       setDepositAmount(value)
       setInputError(null)
+      setShowGasWarning(false) // Clear warning when manually typing
     }
   }
 
@@ -373,6 +383,38 @@ export default function SetupV2Page() {
   }
 
   if (!mounted || !isConnected) return null
+
+  // ============================================
+  // NETWORK CHECK - Block flow if not on Base
+  // ============================================
+  if (chainId !== BASE_CHAIN_ID) {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center px-4">
+        <div className="w-16 h-16 mx-auto rounded-full bg-orange-500/20 flex items-center justify-center mb-6">
+          <svg className="w-8 h-8 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <h2 className="text-xl font-semibold mb-2">Wrong network</h2>
+        <p className="text-[var(--muted)] mb-6 max-w-[300px]">
+          Meezan runs on Base. Please switch networks to continue.
+        </p>
+        <Button
+          size="large"
+          onClick={() => switchChain({ chainId: BASE_CHAIN_ID })}
+          disabled={isSwitchingChain}
+        >
+          {isSwitchingChain ? 'Switching...' : 'Switch to Base'}
+        </Button>
+        <button
+          onClick={() => router.push('/')}
+          className="text-[var(--muted)] text-sm mt-6 hover:text-[var(--foreground)]"
+        >
+          Back to home
+        </button>
+      </div>
+    )
+  }
 
   // ============================================
   // SCREEN 1: Choose Portfolio Structure
@@ -771,6 +813,12 @@ export default function SetupV2Page() {
                       refetchBalance()
                     } else {
                       setDepositAmount(usdcBalance)
+                      // Show gas warning if ETH balance is low
+                      if (hasLowGas || hasNoGas) {
+                        setShowGasWarning(true)
+                      } else {
+                        setShowGasWarning(false)
+                      }
                     }
                   }}
                   disabled={balanceLoading}
@@ -792,6 +840,36 @@ export default function SetupV2Page() {
                   `Available: $${parseFloat(usdcBalance).toLocaleString()}`
                 )}
               </p>
+
+              {/* Gas warning when using Max with low ETH */}
+              {showGasWarning && (
+                <div className="mt-3 p-3 rounded-lg bg-orange-500/10 border border-orange-500/20">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <div className="text-sm">
+                      {hasNoGas ? (
+                        <>
+                          <p className="text-orange-400 font-medium">You'll need ETH for network fees</p>
+                          <p className="text-[var(--muted)] mt-1">
+                            This setup requires a small amount of ETH (~0.001) to pay for transaction fees on Base.
+                            You can get ETH on Base from an exchange or bridge.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-orange-400 font-medium">Low ETH balance</p>
+                          <p className="text-[var(--muted)] mt-1">
+                            You have {parseFloat(ethBalance).toFixed(4)} ETH. This may not be enough for all network fees.
+                            Consider adding more ETH to avoid transaction failures.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {inputError && (
                 <p className="text-sm text-red-400 mt-2">{inputError}</p>
@@ -957,7 +1035,7 @@ export default function SetupV2Page() {
                   Depositing will add to your existing vault.
                 </p>
                 <button
-                  onClick={() => router.push(`/portfolio-v2?vault=${existingVault}`)}
+                  onClick={() => router.push('/portfolio')}
                   className="text-blue-400 hover:underline"
                 >
                   View portfolio instead
@@ -1073,7 +1151,7 @@ export default function SetupV2Page() {
         </h2>
         <p className="text-[var(--muted)] text-sm mb-8">
           {txState?.step?.includes('waiting')
-            ? 'Transaction submitted. Waiting for confirmation...'
+            ? 'Confirming on Base...'
             : 'Confirm in your wallet to continue'}
         </p>
 

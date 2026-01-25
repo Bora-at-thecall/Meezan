@@ -1,5 +1,5 @@
 import { http, createConfig, fallback } from 'wagmi'
-import { base } from 'wagmi/chains'
+import { base, baseSepolia } from 'wagmi/chains'
 import { injected, coinbaseWallet } from 'wagmi/connectors'
 
 // Use multiple RPCs with fallback to avoid rate limiting
@@ -13,14 +13,21 @@ const baseTransport = fallback([
   http(),
 ])
 
+// Base Sepolia transport for V3 testnet
+const baseSepoliaTransport = fallback([
+  http('https://sepolia.base.org', { timeout: 10_000 }),
+  http(),
+])
+
 export const config = createConfig({
-  chains: [base],
+  chains: [base, baseSepolia],
   connectors: [
     injected(),
     coinbaseWallet({ appName: 'Meezan' }),
   ],
   transports: {
     [base.id]: baseTransport,
+    [baseSepolia.id]: baseSepoliaTransport,
   },
 })
 

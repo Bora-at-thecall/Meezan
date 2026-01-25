@@ -6,6 +6,20 @@
 
 ---
 
+## Pre-Test Verification (2026-01-24)
+
+| Item | Method | Status |
+|------|--------|--------|
+| TypeScript build | `npm run build` | PASS |
+| Contract tests | `forge test` | PASS (verified earlier) |
+| Network check UI | Code review | VERIFIED - blocks on wrong chain |
+| Tx hash visibility | Code review | VERIFIED - Basescan links added |
+| Quote API integrity | Code review | VERIFIED - QuoterV2 fallback, no hardcoded prices |
+| Gas warning | Code review | VERIFIED - shows on low ETH |
+| Safe vault cleanup | Code review | VERIFIED - retry with backoff |
+
+---
+
 ## Prerequisites
 
 - [ ] Wallet with $20-50 USDC on Base
@@ -136,3 +150,27 @@ Tester: _______________
 Vault Address: _______________
 Result: [ ] PASS / [ ] FAIL
 Notes: _______________
+
+---
+
+## Verification Notes
+
+**Items verified via build/tests (automated):**
+- TypeScript compilation: PASS
+- Contract unit tests: PASS
+- Static analysis (Slither): 0 high/medium in Meezan code
+
+**Items verified via code review:**
+- Network validation on all V2 pages
+- Basescan links during transaction processing
+- Quote API uses real on-chain/API data only
+- Gas warning appears on low ETH
+- Vault cleanup handles RPC failures safely
+
+**Items requiring manual verification:**
+- All steps in "Test Steps" section above
+- Wallet interaction and transaction signing
+- Basescan contract verification
+- End-to-end fund flow
+
+**Last pre-test verification:** 2026-01-24

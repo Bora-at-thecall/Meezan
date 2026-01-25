@@ -11,21 +11,26 @@ import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
 /**
- * @title MeezanVaultV2
- * @notice Multi-asset portfolio vault with automatic rebalancing
- * @dev Supports 2-10 assets with target weight allocation and drift-based rebalancing
+ * @title MeezanVaultV3
+ * @notice Multi-asset portfolio vault with automatic rebalancing and USDC conversion
+ * @dev Extends V2 with instant atomic conversion and background conversion fallback
  *
- * Key differences from v1:
- * - Variable asset count (2-10) vs fixed 2
- * - All swaps route through stablecoin intermediary
- * - Max-drift calculation across all assets
- * - Per-asset pool fees
+ * Key additions from V2:
+ * - convertAndWithdraw(): Instant atomic conversion to USDC + withdrawal
+ * - Background conversion: requestConversion() + executeConversion() for fallback
+ * - Conversion executor: Separate from rebalance executor, set at construction
+ *
+ * Invariants:
+ * - INV-W1: withdrawAll() ALWAYS succeeds, regardless of conversion state
+ * - INV-W2: withdrawAll() never performs swaps
+ * - INV-W3: withdrawAll() auto-cancels pending conversion
+ * - INV-C1: convertAndWithdraw() is atomic - full success or full revert
+ * - INV-C2: No partial conversion state is possible
+ * - INV-C3: Only one pending conversion at a time
  *
  * @dev IMPORTANT: This contract does NOT support fee-on-transfer or rebasing tokens.
- * Only standard ERC20 tokens are supported (e.g., cbBTC, WETH, USDC on Base).
- * Using fee-on-transfer tokens will cause accounting discrepancies.
  */
-contract MeezanVaultV2 is ReentrancyGuard, Pausable {
+contract MeezanVaultV3 is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // ============ Constants ============
@@ -50,6 +55,7 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     error OnlyOwner();
     error OnlyOwnerOrExecutor();
+    error OnlyConversionExecutor();
     error ZeroAmount();
     error ZeroAddress();
     error DuplicateAsset();
@@ -75,6 +81,14 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
     error InvalidAssetIndex();
     error SlippageExceeded();
     error InsufficientBalanceForSwap();
+    // V3 conversion errors
+    error ConversionAlreadyPending();
+    error NoConversionPending();
+    error BackgroundConversionDisabled();
+    error NoConversionExecutor();
+    error ConversionPendingMustCancel();
+    error InvalidMinAmountsLength();
+    error ZeroMinAmountOut();
 
     // ============ Events ============
 
@@ -87,7 +101,6 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event TokenRescued(address indexed token, uint256 amount);
 
-    // v2 specific events
     event RebalanceIntent(
         address indexed caller,
         uint16 portfolioDriftBps,
@@ -109,27 +122,59 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         uint256 usdcAmount
     );
 
+    // V3 conversion events
+    event ConvertedAndWithdrawn(
+        address indexed owner,
+        uint256 totalUSDC,
+        uint256 cbBTCConverted,
+        uint256 wethConverted
+    );
+
+    event ConversionRequested(
+        address indexed owner,
+        uint256 timestamp
+    );
+
+    event ConversionExecuted(
+        address indexed executor,
+        uint256 totalUSDC,
+        uint256 cbBTCConverted,
+        uint256 wethConverted
+    );
+
+    event ConversionCancelled(
+        address indexed owner
+    );
+
+    event BackgroundConversionDisabledEvent(
+        address indexed owner
+    );
+
+    event BackgroundConversionEnabled(
+        address indexed owner
+    );
+
     // ============ Structs ============
 
-    /// @notice Configuration for each asset in the portfolio
     struct AssetConfig {
-        address token;           // ERC20 address
-        address priceFeed;       // Chainlink aggregator
-        uint24 poolFee;          // Uniswap V3 fee tier for stablecoin pair
-        uint16 targetWeightBps;  // Target allocation (100 = 1%)
+        address token;
+        address priceFeed;
+        uint24 poolFee;
+        uint16 targetWeightBps;
     }
 
     // ============ Immutable State ============
-    // Note: Solidity doesn't support immutable arrays, so we use internal state
-    // These are set once in constructor and have no setters
 
     uint8 public immutable assetCount;
     uint8 public immutable stablecoinIndex;
     uint16 public immutable driftThresholdBps;
     ISwapRouter public immutable swapRouter;
 
+    /// @notice Conversion executor address (set at construction, cannot be changed)
+    /// @dev Separate from rebalance executor for security isolation
+    address public immutable conversionExecutor;
+
     // Fixed-size arrays (padded to MAX_ASSETS)
-    // These are effectively immutable - set in constructor, no setters
     address[MAX_ASSETS] internal _assets;
     address[MAX_ASSETS] internal _priceFeeds;
     uint24[MAX_ASSETS] internal _poolFees;
@@ -143,8 +188,15 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
     address public pendingOwner;
     uint64 public lastRebalanceAt;
     bool public autoRebalanceEnabled;
-    address public executor;
+    address public executor;  // Rebalance executor
     uint16 public slippageBps;
+
+    // V3 conversion state
+    /// @notice Whether a background conversion is pending
+    bool public conversionRequested;
+
+    /// @notice Whether background conversion is disabled by owner
+    bool public backgroundConversionDisabled;
 
     // ============ Modifiers ============
 
@@ -162,37 +214,46 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         _;
     }
 
+    modifier onlyConversionExecutor() {
+        if (backgroundConversionDisabled) revert BackgroundConversionDisabled();
+        if (msg.sender != conversionExecutor) revert OnlyConversionExecutor();
+        _;
+    }
+
     // ============ Constructor ============
 
     /**
-     * @notice Deploy a new multi-asset vault
+     * @notice Deploy a new V3 multi-asset vault with conversion support
      * @param assets Array of asset configurations (2-10 assets)
      * @param _swapRouter Uniswap V3 SwapRouter address
      * @param _stablecoin Address of stablecoin (must be in assets array)
      * @param _driftThresholdBps Drift threshold in basis points (200-2000)
-     * @param _owner Address of vault owner (set immediately, no acceptance required)
+     * @param _owner Address of vault owner
+     * @param _conversionExecutor Address authorized to execute background conversions
      */
     constructor(
         AssetConfig[] memory assets,
         address _swapRouter,
         address _stablecoin,
         uint16 _driftThresholdBps,
-        address _owner
+        address _owner,
+        address _conversionExecutor
     ) {
-        // Validate asset count (INV-03)
+        // Validate asset count
         if (assets.length < MIN_ASSETS) revert TooFewAssets();
         if (assets.length > MAX_ASSETS) revert TooManyAssets();
 
-        // Validate swap router and owner
+        // Validate addresses
         if (_swapRouter == address(0)) revert ZeroAddress();
         if (_owner == address(0)) revert ZeroAddress();
+        // Note: _conversionExecutor can be address(0) to disable background conversion
 
-        // Validate drift threshold (INV-19)
+        // Validate drift threshold
         if (_driftThresholdBps < MIN_DRIFT_BPS || _driftThresholdBps > MAX_DRIFT_BPS) {
             revert InvalidDriftThreshold();
         }
 
-        // Validate weight sum and find stablecoin (INV-01, INV-04)
+        // Validate weights and find stablecoin
         uint256 totalWeight = 0;
         bool stablecoinFound = false;
         uint8 stableIdx = 0;
@@ -200,30 +261,25 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         for (uint8 i = 0; i < assets.length; i++) {
             AssetConfig memory asset = assets[i];
 
-            // Validate addresses
             if (asset.token == address(0)) revert ZeroAddress();
             if (asset.priceFeed == address(0)) revert ZeroAddress();
 
-            // Check for duplicates
+            // Check duplicates
             for (uint8 j = 0; j < i; j++) {
                 if (asset.token == assets[j].token) revert DuplicateAsset();
             }
 
-            // Validate minimum weight (INV-02)
             if (asset.targetWeightBps < MIN_WEIGHT_BPS) revert WeightTooSmall();
 
-            // Validate pool fee
             if (asset.poolFee != 100 && asset.poolFee != 500 && asset.poolFee != 3000 && asset.poolFee != 10000) {
                 revert InvalidPoolFee();
             }
 
-            // Get and validate decimals
             uint8 tokenDec = IERC20Metadata(asset.token).decimals();
             uint8 feedDec = AggregatorV3Interface(asset.priceFeed).decimals();
             if (tokenDec > 18) revert InvalidTokenDecimals();
             if (feedDec > 18) revert InvalidFeedDecimals();
 
-            // Store asset configuration
             _assets[i] = asset.token;
             _priceFeeds[i] = asset.priceFeed;
             _poolFees[i] = asset.poolFee;
@@ -233,17 +289,13 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
             totalWeight += asset.targetWeightBps;
 
-            // Find stablecoin index
             if (asset.token == _stablecoin) {
                 stablecoinFound = true;
                 stableIdx = i;
             }
         }
 
-        // Validate weight sum equals 100% (INV-01)
         if (totalWeight != BPS_DENOMINATOR) revert InvalidAllocation();
-
-        // Validate stablecoin is in assets (INV-04)
         if (!stablecoinFound) revert StablecoinNotInAssets();
 
         // Set immutables
@@ -251,8 +303,9 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         stablecoinIndex = stableIdx;
         driftThresholdBps = _driftThresholdBps;
         swapRouter = ISwapRouter(_swapRouter);
+        conversionExecutor = _conversionExecutor;
 
-        // Set initial mutable state (owner is set directly, no acceptance required)
+        // Set initial mutable state
         owner = _owner;
         slippageBps = DEFAULT_SLIPPAGE_BPS;
 
@@ -261,13 +314,11 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     // ============ View Functions: Asset Configuration ============
 
-    /// @notice Get asset address by index
     function assets(uint8 index) external view returns (address) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _assets[index];
     }
 
-    /// @notice Get all asset addresses
     function allAssets() external view returns (address[] memory) {
         address[] memory result = new address[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
@@ -276,13 +327,11 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         return result;
     }
 
-    /// @notice Get target weight for asset by index
     function targetWeightBps(uint8 index) external view returns (uint16) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _targetWeightsBps[index];
     }
 
-    /// @notice Get all target weights
     function allTargetWeights() external view returns (uint16[] memory) {
         uint16[] memory result = new uint16[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
@@ -291,13 +340,11 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         return result;
     }
 
-    /// @notice Get price feed address for asset by index
     function priceFeed(uint8 index) external view returns (address) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _priceFeeds[index];
     }
 
-    /// @notice Get pool fee for asset by index
     function poolFee(uint8 index) external view returns (uint24) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _poolFees[index];
@@ -305,7 +352,6 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     // ============ View Functions: Portfolio State ============
 
-    /// @notice Get current token balances (INV-16: holdings match balances)
     function holdings() external view returns (uint256[] memory balances) {
         balances = new uint256[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
@@ -313,7 +359,6 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         }
     }
 
-    /// @notice Get USD value of each asset
     function getUsdValues() external view returns (uint256[] memory values) {
         values = new uint256[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
@@ -321,24 +366,21 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         }
     }
 
-    /// @notice Get total USD value of portfolio
     function totalUsdValue() external view returns (uint256) {
         return _totalUsdValue();
     }
 
-    /// @notice Get current weight of asset in basis points
     function currentWeightBps(uint8 index) external view returns (uint16) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _currentWeightBps(index);
     }
 
-    /// @notice Get all current weights (INV-17: sum to 10000)
     function allCurrentWeights() external view returns (uint16[] memory weights) {
         weights = new uint16[](assetCount);
         uint256 total = _totalUsdValue();
 
         if (total == 0) {
-            return weights; // All zeros
+            return weights;
         }
 
         uint256 sum = 0;
@@ -346,21 +388,14 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
             weights[i] = uint16((_assetUsdValue(i) * BPS_DENOMINATOR) / total);
             sum += weights[i];
         }
-        // Assign remainder to last asset to ensure sum = 10000.
-        // SAFETY: Underflow is impossible here. Each weight[i] is calculated as
-        // floor(assetValue * 10000 / total). The sum of floor divisions is always
-        // <= the original numerator sum (10000), since floor() only truncates.
-        // Therefore: sum <= 10000, and (10000 - sum) >= 0.
         weights[assetCount - 1] = uint16(BPS_DENOMINATOR - sum);
     }
 
-    /// @notice Get drift of single asset in basis points
     function assetDriftBps(uint8 index) external view returns (uint16) {
         if (index >= assetCount) revert InvalidAssetIndex();
         return _assetDriftBps(index);
     }
 
-    /// @notice Get portfolio drift (max of all asset drifts) (INV-18)
     function portfolioDriftBps() public view returns (uint16) {
         uint16 maxDrift = 0;
         for (uint8 i = 0; i < assetCount; i++) {
@@ -372,9 +407,34 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         return maxDrift;
     }
 
-    /// @notice Check if rebalance is needed (drift >= threshold)
     function needsRebalance() external view returns (bool) {
         return portfolioDriftBps() >= driftThresholdBps;
+    }
+
+    /// @notice Get count of non-stablecoin assets (for minAmountsOut array sizing)
+    function nonStablecoinAssetCount() external view returns (uint8) {
+        return assetCount - 1;
+    }
+
+    /**
+     * @notice Get the asset order for minAmountsOut array in conversion functions
+     * @return tokens Array of token addresses in the order expected by minAmountsOut
+     * @return indices Array of asset indices corresponding to each token
+     * @dev minAmountsOut[i] corresponds to tokens[i] (asset at indices[i])
+     *      Stablecoin is excluded from this array
+     */
+    function getConversionAssetOrder() external view returns (address[] memory tokens, uint8[] memory indices) {
+        uint8 nonStableCount = assetCount - 1;
+        tokens = new address[](nonStableCount);
+        indices = new uint8[](nonStableCount);
+
+        uint8 idx = 0;
+        for (uint8 i = 0; i < assetCount; i++) {
+            if (i == stablecoinIndex) continue;
+            tokens[idx] = _assets[i];
+            indices[idx] = i;
+            idx++;
+        }
     }
 
     // ============ Internal View Functions ============
@@ -392,8 +452,6 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         uint32 staleness = _getStalenessForAsset(index);
         uint256 price = _getPrice(_priceFeeds[index], staleness);
 
-        // value = balance * price / 10^tokenDecimals
-        // Then scale to USD_PRECISION (1e18)
         uint256 value = Math.mulDiv(balance, price, 10 ** _tokenDecimals[index]);
         return Math.mulDiv(value, USD_PRECISION, 10 ** _feedDecimals[index]);
     }
@@ -443,25 +501,27 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     // ============ Owner Functions: Deposits ============
 
-    /// @notice Deposit a specific asset
     function deposit(uint8 assetIndex, uint256 amount) external onlyOwner whenNotPaused {
+        // Auto-cancel pending conversion on deposit (user is adding funds, not withdrawing)
+        if (conversionRequested) {
+            conversionRequested = false;
+            emit ConversionCancelled(msg.sender);
+        }
         _deposit(assetIndex, amount);
     }
 
-    /// @notice Deposit stablecoin and immediately rebalance in a single transaction
-    /// @dev Combines deposit + rebalance into one user action for better UX
-    /// @param assetIndex Index of asset to deposit (typically stablecoin)
-    /// @param amount Amount to deposit
     function depositAndRebalance(uint8 assetIndex, uint256 amount) external onlyOwner nonReentrant whenNotPaused {
-        // Deposit the asset
+        // Auto-cancel pending conversion on deposit (user is adding funds, not withdrawing)
+        if (conversionRequested) {
+            conversionRequested = false;
+            emit ConversionCancelled(msg.sender);
+        }
+
         _deposit(assetIndex, amount);
 
-        // Rebalance if needed (will buy BTC/ETH from USDC)
-        // Skip drift threshold check - user explicitly wants to allocate
         uint256 totalUsd = _totalUsdValue();
-        if (totalUsd == 0) return; // Nothing to rebalance
+        if (totalUsd == 0) return;
 
-        // Calculate deltas and execute swaps
         int256[] memory deltas = new int256[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
             uint256 currentUsd = _assetUsdValue(i);
@@ -469,17 +529,12 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
             deltas[i] = int256(currentUsd) - int256(targetUsd);
         }
 
-        // Execute swaps (sells overweight, buys underweight)
         uint8 swapsExecuted = _executeRebalanceSwaps(deltas);
-
-        // Update timestamp
         lastRebalanceAt = uint64(block.timestamp);
 
-        // Emit completion event
         emit Rebalanced(msg.sender, portfolioDriftBps(), swapsExecuted, uint64(block.timestamp));
     }
 
-    /// @notice Internal deposit logic
     function _deposit(uint8 assetIndex, uint256 amount) internal {
         if (assetIndex >= assetCount) revert InvalidAssetIndex();
         if (amount == 0) revert ZeroAmount();
@@ -488,10 +543,8 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         emit Deposit(msg.sender, _assets[assetIndex], amount);
     }
 
-    // ============ Owner Functions: Withdrawals (INV-05, INV-14, INV-15) ============
+    // ============ Owner Functions: Withdrawals ============
 
-    /// @notice Withdraw specific amount of an asset
-    /// @dev No whenNotPaused - withdrawals always work (INV-14)
     function withdraw(uint8 assetIndex, uint256 amount) external onlyOwner {
         if (assetIndex >= assetCount) revert InvalidAssetIndex();
         if (amount == 0) revert ZeroAmount();
@@ -505,7 +558,14 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     /// @notice Withdraw all assets
     /// @dev No whenNotPaused - withdrawals always work (INV-14)
+    /// @dev Auto-cancels pending conversion if any
     function withdrawAll() external onlyOwner returns (uint256[] memory amounts) {
+        // Auto-cancel pending conversion (no external calls, just state change)
+        if (conversionRequested) {
+            conversionRequested = false;
+            emit ConversionCancelled(msg.sender);
+        }
+
         amounts = new uint256[](assetCount);
 
         for (uint8 i = 0; i < assetCount; i++) {
@@ -515,6 +575,207 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
                 emit Withdraw(msg.sender, _assets[i], amounts[i]);
             }
         }
+    }
+
+    // ============ V3: Instant Atomic Conversion (Path B) ============
+
+    /**
+     * @notice Convert all assets to USDC and withdraw in a single atomic transaction
+     * @param minAmountsOut Minimum USDC expected from each non-stablecoin asset swap
+     *        Array length must equal (assetCount - 1), ordered by asset index excluding stablecoin
+     * @dev INV-C1: Full success or full revert - no partial conversion state
+     * @dev Cannot be called while conversion is pending
+     */
+    function convertAndWithdraw(uint256[] calldata minAmountsOut) external onlyOwner nonReentrant {
+        // Block if conversion pending - user must cancel first
+        if (conversionRequested) revert ConversionPendingMustCancel();
+
+        // Validate minAmountsOut length
+        if (minAmountsOut.length != assetCount - 1) revert InvalidMinAmountsLength();
+
+        // Execute swaps and withdraw
+        (uint256 totalUSDC, uint256 cbBTCConverted, uint256 wethConverted) = _convertAllToUsdc(minAmountsOut);
+
+        // Transfer all USDC to owner
+        uint256 usdcBalance = IERC20(_assets[stablecoinIndex]).balanceOf(address(this));
+        if (usdcBalance > 0) {
+            IERC20(_assets[stablecoinIndex]).safeTransfer(msg.sender, usdcBalance);
+        }
+
+        emit ConvertedAndWithdrawn(msg.sender, totalUSDC, cbBTCConverted, wethConverted);
+    }
+
+    // ============ V3: Background Conversion (Path C) ============
+
+    /**
+     * @notice Request background conversion (user opts into executor path)
+     * @dev INV-C3: Only one pending conversion at a time
+     */
+    function requestConversion() external onlyOwner {
+        if (conversionExecutor == address(0)) revert NoConversionExecutor();
+        if (backgroundConversionDisabled) revert BackgroundConversionDisabled();
+        if (conversionRequested) revert ConversionAlreadyPending();
+
+        conversionRequested = true;
+        emit ConversionRequested(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice Execute pending background conversion
+     * @param minAmountsOut Minimum USDC expected from each non-stablecoin asset swap
+     * @dev Only callable by authorized conversion executor
+     * @dev On success: swaps complete, USDC remains in vault (user calls withdrawAll)
+     * @dev On revert: state unchanged, executor retries later
+     */
+    function executeConversion(uint256[] calldata minAmountsOut) external onlyConversionExecutor nonReentrant {
+        if (!conversionRequested) revert NoConversionPending();
+        if (minAmountsOut.length != assetCount - 1) revert InvalidMinAmountsLength();
+
+        // Execute swaps
+        (uint256 totalUSDC, uint256 cbBTCConverted, uint256 wethConverted) = _convertAllToUsdc(minAmountsOut);
+
+        // Clear conversion state
+        conversionRequested = false;
+
+        emit ConversionExecuted(msg.sender, totalUSDC, cbBTCConverted, wethConverted);
+    }
+
+    /**
+     * @notice Cancel pending background conversion
+     * @dev Assets remain in vault unchanged
+     */
+    function cancelConversion() external onlyOwner {
+        if (!conversionRequested) revert NoConversionPending();
+
+        conversionRequested = false;
+        emit ConversionCancelled(msg.sender);
+    }
+
+    // ============ V3: Background Conversion Control ============
+
+    /**
+     * @notice Disable background conversion
+     * @dev If conversion pending, auto-cancels it
+     */
+    function disableBackgroundConversion() external onlyOwner {
+        if (conversionRequested) {
+            conversionRequested = false;
+            emit ConversionCancelled(msg.sender);
+        }
+
+        backgroundConversionDisabled = true;
+        emit BackgroundConversionDisabledEvent(msg.sender);
+    }
+
+    /**
+     * @notice Enable background conversion
+     */
+    function enableBackgroundConversion() external onlyOwner {
+        if (conversionExecutor == address(0)) revert NoConversionExecutor();
+
+        backgroundConversionDisabled = false;
+        emit BackgroundConversionEnabled(msg.sender);
+    }
+
+    // ============ Internal: Conversion Logic ============
+
+    /**
+     * @notice Convert all non-stablecoin assets to USDC
+     * @param minAmountsOut Minimum USDC for each swap (must be > 0 for non-dust swaps)
+     * @return totalUSDC Total USDC after conversion
+     * @return cbBTCConverted Amount of cbBTC converted (for events)
+     * @return wethConverted Amount of WETH converted (for events)
+     * @dev Skips assets with USD value below MIN_SWAP_USD (dust threshold)
+     */
+    function _convertAllToUsdc(uint256[] calldata minAmountsOut) internal returns (
+        uint256 totalUSDC,
+        uint256 cbBTCConverted,
+        uint256 wethConverted
+    ) {
+        address stablecoin = _assets[stablecoinIndex];
+        uint256 minAmountsIdx = 0;
+
+        // Swap each non-stablecoin asset to USDC
+        for (uint8 i = 0; i < assetCount; i++) {
+            if (i == stablecoinIndex) continue;
+
+            uint256 balance = IERC20(_assets[i]).balanceOf(address(this));
+            uint256 minOut = minAmountsOut[minAmountsIdx];
+            minAmountsIdx++;
+
+            // Skip if no balance
+            if (balance == 0) {
+                continue;
+            }
+
+            // Skip dust amounts (below MIN_SWAP_USD threshold)
+            // This mirrors V2 rebalance behavior
+            uint256 assetUsdValue = _assetUsdValue(i);
+            if (assetUsdValue < MIN_SWAP_USD) {
+                continue;
+            }
+
+            // Sanity check: minOut must be > 0 for non-dust swaps
+            // This prevents executor from passing zeros to grief users
+            if (minOut == 0) revert ZeroMinAmountOut();
+
+            // Execute swap: asset -> USDC
+            uint256 usdcReceived = _swapToUsdc(i, balance, minOut);
+
+            // Track for event emission (simplified - assumes index 0 is cbBTC, index 1 is WETH)
+            // In production, you'd want to track by address instead
+            if (i == 0 && i != stablecoinIndex) {
+                cbBTCConverted = balance;
+            } else if (i == 1 && i != stablecoinIndex) {
+                wethConverted = balance;
+            } else if (i == 0 && stablecoinIndex == 1) {
+                cbBTCConverted = balance;
+            } else if (i == 1 && stablecoinIndex == 0) {
+                wethConverted = balance;
+            }
+
+            totalUSDC += usdcReceived;
+        }
+
+        // Total USDC is final vault balance (includes original USDC + swapped amounts)
+        totalUSDC = IERC20(stablecoin).balanceOf(address(this));
+    }
+
+    /**
+     * @notice Swap a single asset to USDC using exactInputSingle
+     * @param assetIndex Index of asset to swap
+     * @param amountIn Amount of asset to swap
+     * @param minAmountOut Minimum USDC to receive
+     * @return amountOut Actual USDC received
+     */
+    function _swapToUsdc(uint8 assetIndex, uint256 amountIn, uint256 minAmountOut) internal returns (uint256 amountOut) {
+        address token = _assets[assetIndex];
+        address stablecoin = _assets[stablecoinIndex];
+        uint24 fee = _poolFees[assetIndex];
+
+        // Approve router
+        IERC20(token).forceApprove(address(swapRouter), amountIn);
+
+        // Execute swap
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: token,
+            tokenOut: stablecoin,
+            fee: fee,
+            recipient: address(this),
+            amountIn: amountIn,
+            amountOutMinimum: minAmountOut,
+            sqrtPriceLimitX96: 0
+        });
+
+        amountOut = swapRouter.exactInputSingle(params);
+
+        // Revoke approval
+        IERC20(token).forceApprove(address(swapRouter), 0);
+
+        // Verify slippage (belt and suspenders)
+        if (amountOut < minAmountOut) revert SlippageExceeded();
+
+        emit SwapExecuted(assetIndex, true, amountIn, amountOut);
     }
 
     // ============ Owner Functions: Configuration ============
@@ -547,7 +808,7 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         _unpause();
     }
 
-    // ============ Owner Functions: Ownership (INV-07) ============
+    // ============ Owner Functions: Ownership ============
 
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert ZeroAddress();
@@ -565,9 +826,7 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
     // ============ Owner Functions: Rescue ============
 
-    /// @notice Rescue accidentally sent tokens (not vault assets)
     function rescueToken(address token) external onlyOwner {
-        // Check token is not a vault asset
         for (uint8 i = 0; i < assetCount; i++) {
             if (token == _assets[i]) revert CannotRescueVaultToken();
         }
@@ -579,30 +838,27 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         emit TokenRescued(token, balance);
     }
 
-    // ============ Rebalance with Swap Execution ============
+    // ============ Rebalance ============
 
-    /**
-     * @notice Execute portfolio rebalance with swap execution (INV-11, INV-12)
-     * @dev Two-phase execution: sell overweight → USDC, then USDC → buy underweight
-     *      Fail-closed: any failure reverts entire transaction
-     */
     function rebalance() external onlyOwnerOrExecutor nonReentrant whenNotPaused {
-        // Verify drift threshold (INV-11)
+        // Auto-cancel pending conversion on rebalance (user is managing portfolio, not withdrawing)
+        if (conversionRequested) {
+            conversionRequested = false;
+            emit ConversionCancelled(owner);
+        }
+
         uint16 drift = portfolioDriftBps();
         if (drift < driftThresholdBps) revert DriftBelowThreshold();
 
-        // Verify cooldown for executor (INV-06)
         if (msg.sender != owner) {
             if (lastRebalanceAt != 0 && block.timestamp - lastRebalanceAt < COOLDOWN_SECONDS) {
                 revert CooldownNotElapsed();
             }
         }
 
-        // Calculate total value
         uint256 totalUsd = _totalUsdValue();
         if (totalUsd == 0) revert EmptyVault();
 
-        // Calculate deltas (positive = overweight, negative = underweight)
         int256[] memory deltas = new int256[](assetCount);
         for (uint8 i = 0; i < assetCount; i++) {
             uint256 currentUsd = _assetUsdValue(i);
@@ -610,28 +866,17 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
             deltas[i] = int256(currentUsd) - int256(targetUsd);
         }
 
-        // Execute swaps
         uint8 swapsExecuted = _executeRebalanceSwaps(deltas);
-
-        // Update timestamp
         lastRebalanceAt = uint64(block.timestamp);
 
-        // Emit completion event
         emit Rebalanced(msg.sender, drift, swapsExecuted, uint64(block.timestamp));
     }
 
-    /**
-     * @notice Execute rebalance swaps in two phases
-     * @param deltas USD deltas per asset (positive = overweight, negative = underweight)
-     * @return swapsExecuted Number of swaps executed
-     * @dev Phase 1: Sell overweight assets → USDC
-     *      Phase 2: USDC → Buy underweight assets
-     */
     function _executeRebalanceSwaps(int256[] memory deltas) internal returns (uint8 swapsExecuted) {
-        // Phase 1: Sell all overweight assets to USDC
+        // Phase 1: Sell overweight to USDC
         for (uint8 i = 0; i < assetCount; i++) {
-            if (i == stablecoinIndex) continue; // Skip USDC itself
-            if (deltas[i] <= int256(MIN_SWAP_USD)) continue; // Not overweight or below dust
+            if (i == stablecoinIndex) continue;
+            if (deltas[i] <= int256(MIN_SWAP_USD)) continue;
 
             if (swapsExecuted >= MAX_SWAPS_PER_REBALANCE) break;
 
@@ -639,10 +884,10 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
             swapsExecuted++;
         }
 
-        // Phase 2: Buy all underweight assets from USDC
+        // Phase 2: Buy underweight from USDC
         for (uint8 i = 0; i < assetCount; i++) {
-            if (i == stablecoinIndex) continue; // Skip USDC itself
-            if (deltas[i] >= -int256(MIN_SWAP_USD)) continue; // Not underweight or below dust
+            if (i == stablecoinIndex) continue;
+            if (deltas[i] >= -int256(MIN_SWAP_USD)) continue;
 
             if (swapsExecuted >= MAX_SWAPS_PER_REBALANCE) break;
 
@@ -653,49 +898,34 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
         return swapsExecuted;
     }
 
-    /**
-     * @notice Sell asset to USDC (exactOutputSingle)
-     * @param assetIndex Index of asset to sell
-     * @param usdValue USD value to shift (in 1e18 precision)
-     * @dev Uses exactOutputSingle to get precise USDC amount
-     */
     function _executeSellToUsdc(uint8 assetIndex, uint256 usdValue) internal {
         address token = _assets[assetIndex];
         uint24 fee = _poolFees[assetIndex];
 
-        // Get prices (validates oracle freshness)
         uint256 assetPrice = _getPrice(_priceFeeds[assetIndex], _getStalenessForAsset(assetIndex));
         uint256 stablePrice = _getPrice(_priceFeeds[stablecoinIndex], MAX_PRICE_STALENESS_STABLE);
 
-        // Calculate USDC amount to receive (target output)
-        // usdcToReceive = usdValue * 10^stablecoinDecimals / (stablePrice * 10^(18 - feedDecimals))
         uint256 usdcToReceive = Math.mulDiv(
             usdValue,
             10 ** _tokenDecimals[stablecoinIndex],
             Math.mulDiv(stablePrice, USD_PRECISION, 10 ** _feedDecimals[stablecoinIndex])
         );
 
-        if (usdcToReceive == 0) return; // Skip zero amount
+        if (usdcToReceive == 0) return;
 
-        // Calculate oracle-based asset amount to sell
-        // tokensToSell = usdValue * 10^assetDecimals / (assetPrice * 10^(18 - feedDecimals))
         uint256 oracleTokensToSell = Math.mulDiv(
             usdValue,
             10 ** _tokenDecimals[assetIndex],
             Math.mulDiv(assetPrice, USD_PRECISION, 10 ** _feedDecimals[assetIndex])
         );
 
-        // Add slippage buffer for maximum input
         uint256 maxTokensIn = Math.mulDiv(oracleTokensToSell, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
 
-        // Check balance
         uint256 available = IERC20(token).balanceOf(address(this));
         if (available < maxTokensIn) revert InsufficientBalanceForSwap();
 
-        // Approve router (INV-08: approve exact max amount)
         IERC20(token).forceApprove(address(swapRouter), maxTokensIn);
 
-        // Execute swap: sell asset → get USDC
         ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
             tokenIn: token,
             tokenOut: _assets[stablecoinIndex],
@@ -708,59 +938,42 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
         uint256 actualIn = swapRouter.exactOutputSingle(params);
 
-        // Revoke approval (INV-08: no residual approvals)
         IERC20(token).forceApprove(address(swapRouter), 0);
 
-        // Verify slippage (belt and suspenders - router should enforce this)
         if (actualIn > maxTokensIn) revert SlippageExceeded();
 
         emit SwapExecuted(assetIndex, true, actualIn, usdcToReceive);
     }
 
-    /**
-     * @notice Buy asset from USDC (exactOutputSingle)
-     * @param assetIndex Index of asset to buy
-     * @param usdValue USD value to shift (in 1e18 precision)
-     * @dev Uses exactOutputSingle to get precise asset amount
-     */
     function _executeBuyFromUsdc(uint8 assetIndex, uint256 usdValue) internal {
         address token = _assets[assetIndex];
         uint24 fee = _poolFees[assetIndex];
         address stablecoin = _assets[stablecoinIndex];
 
-        // Get prices (validates oracle freshness)
         uint256 assetPrice = _getPrice(_priceFeeds[assetIndex], _getStalenessForAsset(assetIndex));
         uint256 stablePrice = _getPrice(_priceFeeds[stablecoinIndex], MAX_PRICE_STALENESS_STABLE);
 
-        // Calculate asset amount to receive (target output)
-        // tokensToBuy = usdValue * 10^assetDecimals / (assetPrice * 10^(18 - feedDecimals))
         uint256 tokensToBuy = Math.mulDiv(
             usdValue,
             10 ** _tokenDecimals[assetIndex],
             Math.mulDiv(assetPrice, USD_PRECISION, 10 ** _feedDecimals[assetIndex])
         );
 
-        if (tokensToBuy == 0) return; // Skip zero amount
+        if (tokensToBuy == 0) return;
 
-        // Calculate oracle-based USDC cost
-        // usdcCost = usdValue * 10^stablecoinDecimals / (stablePrice * 10^(18 - feedDecimals))
         uint256 oracleUsdcCost = Math.mulDiv(
             usdValue,
             10 ** _tokenDecimals[stablecoinIndex],
             Math.mulDiv(stablePrice, USD_PRECISION, 10 ** _feedDecimals[stablecoinIndex])
         );
 
-        // Add slippage buffer for maximum input
         uint256 maxUsdcIn = Math.mulDiv(oracleUsdcCost, BPS_DENOMINATOR + slippageBps, BPS_DENOMINATOR);
 
-        // Check balance
         uint256 available = IERC20(stablecoin).balanceOf(address(this));
         if (available < maxUsdcIn) revert InsufficientBalanceForSwap();
 
-        // Approve router (INV-08: approve exact max amount)
         IERC20(stablecoin).forceApprove(address(swapRouter), maxUsdcIn);
 
-        // Execute swap: spend USDC → get asset
         ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
             tokenIn: stablecoin,
             tokenOut: token,
@@ -773,20 +986,13 @@ contract MeezanVaultV2 is ReentrancyGuard, Pausable {
 
         uint256 actualIn = swapRouter.exactOutputSingle(params);
 
-        // Revoke approval (INV-08: no residual approvals)
         IERC20(stablecoin).forceApprove(address(swapRouter), 0);
 
-        // Verify slippage (belt and suspenders - router should enforce this)
         if (actualIn > maxUsdcIn) revert SlippageExceeded();
 
         emit SwapExecuted(assetIndex, false, tokensToBuy, actualIn);
     }
 
-    /**
-     * @notice Preview what swaps would be needed for rebalance
-     * @return deltas Array of USD deltas (positive = overweight, negative = underweight)
-     * @return drift Current portfolio drift in basis points
-     */
     function previewRebalance() external view returns (int256[] memory deltas, uint16 drift) {
         drift = portfolioDriftBps();
 

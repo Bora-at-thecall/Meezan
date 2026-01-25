@@ -444,39 +444,105 @@ const FALLBACK_RPCS = [
   'https://base.llamarpc.com',
 ]
 
+// Retry configuration for RPC calls
+const RPC_RETRY_ATTEMPTS = 3
+const RPC_RETRY_DELAY_MS = 1000
+
+/**
+ * Result of bytecode check - distinguishes between confirmed states and network failures
+ */
+export interface BytecodeCheckResult {
+  /** Whether bytecode exists at the address */
+  exists: boolean
+  /** Whether we successfully verified the state (false means network error) */
+  verified: boolean
+  /** Error message if verification failed */
+  error?: string
+}
+
+/**
+ * Sleep utility for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 /**
  * Check if an address has bytecode (is a deployed contract)
  * This prevents using "phantom" addresses that the factory recorded but never deployed
+ *
+ * IMPORTANT: Returns { verified: false } on network errors to prevent false deletions
  */
 export async function hasContractBytecode(address: Address): Promise<boolean> {
-  for (const rpcUrl of FALLBACK_RPCS) {
-    try {
-      const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'eth_getCode',
-          params: [address, 'latest']
-        })
-      })
+  const result = await checkContractBytecode(address)
+  // Legacy behavior: return exists status, but caller should use checkContractBytecode for safety
+  return result.exists
+}
 
-      const data = await response.json()
-      // If there's bytecode at the address (more than just "0x" or "0x0")
-      if (data.result && data.result !== '0x' && data.result !== '0x0' && data.result.length > 4) {
-        console.log('[hasContractBytecode] Contract exists at', address, '- bytecode length:', data.result.length)
-        return true
+/**
+ * Safe bytecode check that distinguishes network failures from confirmed non-existence
+ * Use this instead of hasContractBytecode when making destructive decisions
+ */
+export async function checkContractBytecode(address: Address): Promise<BytecodeCheckResult> {
+  // Try each RPC with retries
+  for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
+    for (const rpcUrl of FALLBACK_RPCS) {
+      try {
+        const response = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'eth_getCode',
+            params: [address, 'latest']
+          })
+        })
+
+        if (!response.ok) {
+          console.warn(`[checkContractBytecode] RPC ${rpcUrl} returned status ${response.status}`)
+          continue
+        }
+
+        const data = await response.json()
+
+        // Check for RPC error response
+        if (data.error) {
+          console.warn(`[checkContractBytecode] RPC ${rpcUrl} error:`, data.error)
+          continue
+        }
+
+        // If there's bytecode at the address (more than just "0x" or "0x0")
+        if (data.result && data.result !== '0x' && data.result !== '0x0' && data.result.length > 4) {
+          console.log('[checkContractBytecode] Contract exists at', address, '- bytecode length:', data.result.length)
+          return { exists: true, verified: true }
+        }
+
+        // Got a valid response with no/empty bytecode
+        console.log('[checkContractBytecode] No contract at', address, '- result:', data.result?.slice(0, 10))
+        return { exists: false, verified: true }
+      } catch (error) {
+        console.warn(`[checkContractBytecode] RPC ${rpcUrl} failed (attempt ${attempt + 1}):`, error)
+        continue
       }
-      console.log('[hasContractBytecode] No contract at', address, '- result:', data.result?.slice(0, 10))
-      return false
-    } catch (error) {
-      console.warn(`[hasContractBytecode] RPC ${rpcUrl} failed:`, error)
-      continue
+    }
+
+    // Wait before retry (exponential backoff)
+    if (attempt < RPC_RETRY_ATTEMPTS - 1) {
+      const delay = RPC_RETRY_DELAY_MS * Math.pow(2, attempt)
+      console.log(`[checkContractBytecode] Retrying in ${delay}ms...`)
+      await sleep(delay)
     }
   }
-  // If all RPCs fail, assume no bytecode (safer to create new vault)
-  return false
+
+  // All attempts failed - DO NOT assume no bytecode
+  // Return unverified to prevent destructive actions
+  console.error('[checkContractBytecode] All RPC attempts failed for', address)
+  return {
+    exists: false,
+    verified: false,
+    error: 'Network error: Could not verify contract existence'
+  }
 }
 
 /**
@@ -488,9 +554,16 @@ export async function verifyVaultValid(
 ): Promise<{ valid: boolean; reason?: string }> {
   console.log('[verifyVaultValid] Checking vault:', vaultAddress, 'expected owner:', expectedOwner)
 
-  // Step 1: Check bytecode exists
-  const hasBytecode = await hasContractBytecode(vaultAddress)
-  if (!hasBytecode) {
+  // Step 1: Check bytecode exists (with verified check)
+  const bytecodeResult = await checkContractBytecode(vaultAddress)
+
+  // If we couldn't verify, assume valid to prevent false removals
+  if (!bytecodeResult.verified) {
+    console.warn('[verifyVaultValid] Could not verify bytecode, assuming valid:', bytecodeResult.error)
+    return { valid: true, reason: 'unverified_assumed_valid' }
+  }
+
+  if (!bytecodeResult.exists) {
     return { valid: false, reason: 'phantom_vault' }
   }
 
@@ -740,6 +813,7 @@ export function clearAllVaultsV2(owner: Address): void {
 
 /**
  * Validate and clean up stored vaults - removes any that don't actually exist
+ * IMPORTANT: Only removes vaults when non-existence is CONFIRMED (not on network errors)
  */
 export async function cleanupInvalidVaultsV2(owner: Address): Promise<void> {
   if (typeof window === 'undefined') return
@@ -750,11 +824,17 @@ export async function cleanupInvalidVaultsV2(owner: Address): Promise<void> {
   console.log('[cleanupInvalidVaultsV2] Checking', vaults.length, 'stored vaults')
 
   for (const vault of vaults) {
-    const hasBytecode = await hasContractBytecode(vault.address)
-    if (!hasBytecode) {
-      console.log('[cleanupInvalidVaultsV2] Removing invalid vault:', vault.address)
+    const bytecodeResult = await checkContractBytecode(vault.address)
+
+    // Only remove if we CONFIRMED the contract doesn't exist
+    if (bytecodeResult.verified && !bytecodeResult.exists) {
+      console.log('[cleanupInvalidVaultsV2] Removing confirmed invalid vault:', vault.address)
       removeVaultV2(owner, vault.address)
+    } else if (!bytecodeResult.verified) {
+      // Network error - do NOT remove, just log
+      console.warn('[cleanupInvalidVaultsV2] Could not verify vault', vault.address, '- keeping in storage')
     }
+    // If verified && exists, vault is valid, keep it
   }
 }
 

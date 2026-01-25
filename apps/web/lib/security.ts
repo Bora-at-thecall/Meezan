@@ -25,6 +25,11 @@ export const VERIFIED_CONTRACTS = {
   // Deployed 2026-01-24 with immediate ownership + single-tx funding
   factoryV2: '0xc24F363E8F1Df37AEBfb50366118DfafF21983CA' as Address,
 
+  // Meezan Factory V3 - deploys multi-asset vaults with convertAndWithdraw (V3 Lite)
+  // Deployed 2026-01-25, executor=0x0 (background conversion disabled)
+  // TX: 0x9b266c00a1299d379592214608ecc67855b1ac98b648bfad02bbf3fae98a6fc9
+  factoryV3: '0x4194376c40a80cbeb2d0e37be9083307c05010f7' as Address,
+
   // Tokens
   usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,
   cbBTC: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf' as Address,

@@ -91,15 +91,15 @@ if (typeof window !== 'undefined') {
   (window as unknown as { resetMeezan: () => void }).resetMeezan = () => {
     // Clear v1 vaults
     localStorage.removeItem(STORAGE_KEY)
-    // Clear all v2 vaults (they're stored per-address)
+    // Clear all v2 and v3 vaults (they're stored per-address)
     const keysToRemove: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
-      if (key && key.startsWith('meezan_v2_vaults_')) {
+      if (key && (key.startsWith('meezan_v2_vaults_') || key.startsWith('meezan_v3_vaults_'))) {
         keysToRemove.push(key)
       }
     }
     keysToRemove.forEach(key => localStorage.removeItem(key))
-    console.log('Meezan vault cache cleared. Refresh the page.')
+    console.log('Meezan vault cache cleared (v1, v2, v3). Refresh the page.')
   }
 }

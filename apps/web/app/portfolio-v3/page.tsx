@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation'
  * Legacy route - redirects to unified /portfolio
  * Kept for backwards compatibility with bookmarks
  */
-export default function PortfolioV2Redirect() {
+export default function PortfolioV3Redirect() {
   const router = useRouter()
 
   useEffect(() => {

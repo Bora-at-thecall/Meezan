@@ -2,8 +2,12 @@
 
 import { Suspense, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useAccount } from 'wagmi'
+import { useAccount, useChainId, useSwitchChain } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
+import { Button } from '@/components/Button'
+
+// Base mainnet chain ID
+const BASE_CHAIN_ID = 8453
 import { useVaultStateV2, useRebalanceV2, type AssetHolding } from '@/lib/hooks-v2'
 import { useGasEstimate } from '@/lib/hooks'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -117,6 +121,8 @@ function DetailsContentV2() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { address, isConnected } = useAccount()
+  const chainId = useChainId()
+  const { switchChain, isPending: isSwitchingChain } = useSwitchChain()
   const [vaultAddress, setVaultAddress] = useState<Address | null>(null)
   const [rebalanceState, setRebalanceState] = useState<RebalanceState>('idle')
   const [rebalanceError, setRebalanceError] = useState<{ title: string; message: string } | null>(null)
@@ -170,6 +176,36 @@ function DetailsContentV2() {
   }, [isSuccess])
 
   if (!mounted || !isConnected) return null
+
+  // Network check - block if not on Base
+  if (chainId !== BASE_CHAIN_ID) {
+    return (
+      <div className="flex flex-col min-h-[85vh] items-center justify-center text-center px-4">
+        <div className="w-16 h-16 mx-auto rounded-full bg-orange-500/20 flex items-center justify-center mb-6">
+          <svg className="w-8 h-8 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <h2 className="text-xl font-semibold mb-2">Wrong network</h2>
+        <p className="text-[var(--muted)] mb-6 max-w-[300px]">
+          Meezan runs on Base. Please switch networks to continue.
+        </p>
+        <Button
+          size="large"
+          onClick={() => switchChain({ chainId: BASE_CHAIN_ID })}
+          disabled={isSwitchingChain}
+        >
+          {isSwitchingChain ? 'Switching...' : 'Switch to Base'}
+        </Button>
+        <button
+          onClick={() => router.push('/')}
+          className="text-[var(--muted)] text-sm mt-6 hover:text-[var(--foreground)]"
+        >
+          Back to home
+        </button>
+      </div>
+    )
+  }
 
   const handleRebalanceClick = () => {
     setShowRebalanceConfirm(true)

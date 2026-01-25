@@ -1,10 +1,14 @@
 /**
- * Transaction Orchestrator for MeezanVaultV2 Setup Flow
+ * Transaction Orchestrator for MeezanVault Setup Flow
  *
  * SIMPLIFIED 3-STEP FLOW:
- * 1. Create vault via MeezanFactoryV2 (owner is set immediately)
+ * 1. Create vault via Factory (V3 preferred if available, otherwise V2)
  * 2. Approve USDC spending
  * 3. Fund portfolio (depositAndRebalance - single tx for deposit + allocation)
+ *
+ * V3 UPGRADE (2026-01-26):
+ * - On Base mainnet, V3 factory is now REQUIRED (V2 creation forbidden)
+ * - V3 vaults have convertAndWithdraw for atomic USDC conversion
  *
  * Source of Truth Priority:
  * 1. bytecode exists at vault address (eth_getCode)
@@ -30,8 +34,36 @@ import {
   hasContractBytecode,
   type AssetConfigV2,
 } from './contracts-v2'
+import {
+  getV3FactoryAddress,
+  FACTORY_V3_ABI,
+  VAULT_V3_ABI,
+  CONTRACTS_V3_MAINNET,
+} from './contracts-v3'
+import { storeV3Vault } from './vault-detection'
 import { ERC20_ABI } from './contracts'
 import { type AssetId } from './assets'
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// V3 FACTORY DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get the active factory address for vault creation
+ * V3 is REQUIRED on Base mainnet - V2 creation is forbidden
+ */
+function getActiveFactory(chainId: number): { address: Address; abi: readonly any[]; version: 'v3' | 'v2' } {
+  const v3Factory = getV3FactoryAddress(chainId)
+
+  if (v3Factory) {
+    console.log('[Factory] Using V3 factory:', v3Factory)
+    return { address: v3Factory, abi: FACTORY_V3_ABI, version: 'v3' }
+  }
+
+  // Fallback to V2 only if V3 not available (should not happen on mainnet)
+  console.warn('[Factory] V3 not available, falling back to V2 (this should not happen on mainnet)')
+  return { address: CONTRACTS_V2.factoryV2, abi: FACTORY_V2_ABI, version: 'v2' }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PUBLIC CLIENT
@@ -132,7 +164,8 @@ async function verifyChainState(
   ownerAddress: Address,
   assetConfigs: AssetConfigV2[],
   driftThresholdBps: number,
-  depositAmount: bigint
+  depositAmount: bigint,
+  chainId: number = 8453
 ): Promise<ChainState> {
   console.log('[ChainState] Verifying on-chain state for', ownerAddress)
 
@@ -146,14 +179,18 @@ async function verifyChainState(
     vaultBalance: BigInt(0),
   }
 
+  // Get active factory (V3 preferred)
+  const factory = getActiveFactory(chainId)
+  const stablecoin = factory.version === 'v3' ? CONTRACTS_V3_MAINNET.usdc : CONTRACTS_V2.usdc
+
   // Step 1: Query factory for vault address
   let vaultAddress: Address | null = null
   try {
     const factoryResult = await publicClientV2.readContract({
-      address: CONTRACTS_V2.factoryV2,
-      abi: FACTORY_V2_ABI,
+      address: factory.address,
+      abi: factory.abi,
       functionName: 'getVault',
-      args: [ownerAddress, assetConfigs, CONTRACTS_V2.usdc, driftThresholdBps],
+      args: [ownerAddress, assetConfigs, stablecoin, driftThresholdBps],
     })
     if (factoryResult && factoryResult !== '0x0000000000000000000000000000000000000000') {
       vaultAddress = factoryResult as Address
@@ -387,19 +424,26 @@ export class SetupOrchestratorV2 {
   }
 
   /**
-   * Step 1: Create vault via factory
+   * Step 1: Create vault via factory (V3 preferred on mainnet)
    */
   private async createVault(): Promise<void> {
     if (!this.writeContract || !this.waitForReceipt || !this.config || !this.ownerAddress) return
+
+    // Get active factory - V3 is REQUIRED on mainnet
+    const factory = getActiveFactory(8453) // Base mainnet
+    const stablecoin = factory.version === 'v3' ? CONTRACTS_V3_MAINNET.usdc : CONTRACTS_V2.usdc
+    const eventName = factory.version === 'v3' ? 'VaultV3Deployed' : 'VaultV2Deployed'
+
+    console.log(`[Orchestrator] Creating ${factory.version.toUpperCase()} vault via factory:`, factory.address)
 
     try {
       this.setState({ step: 'creating_vault', error: null, message: 'Confirm in wallet...' })
 
       const hash = await this.writeContract({
-        address: CONTRACTS_V2.factoryV2,
-        abi: FACTORY_V2_ABI,
+        address: factory.address,
+        abi: factory.abi,
         functionName: 'createVault',
-        args: [this.assetConfigs, CONTRACTS_V2.usdc, this.config.driftThresholdBps],
+        args: [this.assetConfigs, stablecoin, this.config.driftThresholdBps],
       })
 
       this.setState({ step: 'waiting_vault_confirm', txHash: hash, message: 'Creating vault...' })
@@ -423,12 +467,12 @@ export class SetupOrchestratorV2 {
             }
 
             const decoded = decodeEventLog({
-              abi: FACTORY_V2_ABI,
+              abi: factory.abi,
               data: normalizedLog.data,
               topics: normalizedLog.topics,
             })
 
-            if (decoded.eventName === 'VaultV2Deployed') {
+            if (decoded.eventName === eventName) {
               vaultAddress = (decoded.args as any).vault as Address
               configHash = (decoded.args as any).configHash || 'deployed'
               break
@@ -442,10 +486,10 @@ export class SetupOrchestratorV2 {
       // Fallback: query factory
       if (!vaultAddress) {
         const result = await publicClientV2.readContract({
-          address: CONTRACTS_V2.factoryV2,
-          abi: FACTORY_V2_ABI,
+          address: factory.address,
+          abi: factory.abi,
           functionName: 'getVault',
-          args: [this.ownerAddress, this.assetConfigs, CONTRACTS_V2.usdc, this.config.driftThresholdBps],
+          args: [this.ownerAddress, this.assetConfigs, stablecoin, this.config.driftThresholdBps],
         })
         if (result && result !== '0x0000000000000000000000000000000000000000') {
           vaultAddress = result as Address
@@ -456,9 +500,13 @@ export class SetupOrchestratorV2 {
         throw new Error('Could not determine vault address')
       }
 
-      // Store and proceed
+      // Store in correct localStorage based on version
       this.setState({ vaultAddress, configHash })
-      storeVaultV2(this.ownerAddress, vaultAddress, configHash)
+      if (factory.version === 'v3') {
+        storeV3Vault(this.ownerAddress, vaultAddress)
+      } else {
+        storeVaultV2(this.ownerAddress, vaultAddress, configHash)
+      }
 
       await this.approveUsdc()
     } catch (error: any) {
@@ -526,10 +574,15 @@ export class SetupOrchestratorV2 {
 
       const depositAmount = parseUnits(this.config.depositAmountUsdc, 6)
 
+      // Use correct ABI based on vault version
+      // V3 is preferred on mainnet, but function signature is the same
+      const factory = getActiveFactory(8453)
+      const vaultAbi = factory.version === 'v3' ? VAULT_V3_ABI : VAULT_V2_ABI
+
       // Single transaction: deposit USDC + buy BTC & ETH
       const hash = await this.writeContract({
         address: this.state.vaultAddress,
-        abi: VAULT_V2_ABI,
+        abi: vaultAbi,
         functionName: 'depositAndRebalance',
         args: [this.stablecoinIndex, depositAmount],
       })

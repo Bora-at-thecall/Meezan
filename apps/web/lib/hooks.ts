@@ -1,6 +1,6 @@
 'use client'
 
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContracts } from 'wagmi'
+import { useReadContract, useWriteContract, useWaitForTransactionReceipt, useAccount, useReadContracts, useBalance } from 'wagmi'
 import { parseUnits, formatUnits, type Address } from 'viem'
 import { useCallback, useState, useEffect, useMemo } from 'react'
 import { CONTRACTS, FACTORY_ABI, VAULT_ABI, ERC20_ABI, ALLOCATION_PRESETS, PRICE_FEED_ABI } from './contracts'
@@ -507,6 +507,41 @@ export function useUsdcBalance() {
     isLoading: isLoading || isFetching,
     isError,
     refetch,
+  }
+}
+
+// Hook to read native ETH balance for gas checking
+export function useEthBalance() {
+  const { address } = useAccount()
+
+  const { data, refetch, isLoading, isError } = useBalance({
+    address,
+    chainId: 8453, // Base mainnet
+    query: {
+      enabled: !!address,
+      staleTime: 10_000,
+    },
+  })
+
+  // Gas thresholds (in ETH)
+  const LOW_GAS_THRESHOLD = 0.001 // ~$3 at typical ETH prices
+  const ZERO_GAS_THRESHOLD = 0.0001 // Essentially zero
+
+  const balanceValue = data?.value ?? BigInt(0)
+  const balanceEth = parseFloat(formatUnits(balanceValue, 18))
+  const formatted = balanceEth.toFixed(6)
+
+  return {
+    balance: balanceValue,
+    formatted,
+    balanceEth,
+    isLoading,
+    isError,
+    refetch,
+    // Gas status helpers
+    hasEnoughGas: balanceEth >= LOW_GAS_THRESHOLD,
+    hasLowGas: balanceEth > ZERO_GAS_THRESHOLD && balanceEth < LOW_GAS_THRESHOLD,
+    hasNoGas: balanceEth <= ZERO_GAS_THRESHOLD,
   }
 }
 
