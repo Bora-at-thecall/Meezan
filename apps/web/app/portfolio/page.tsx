@@ -8,6 +8,8 @@ import { type Address, formatUnits } from 'viem'
 import { Button } from '@/components/Button'
 import { WithdrawV3Dialog } from '@/components/WithdrawV3Dialog'
 import { UpgradeV3Banner } from '@/components/UpgradeV3Banner'
+import { ProfileMenu } from '@/components/ProfileMenu'
+import { AppFooter } from '@/components/AppFooter'
 import { useVaultDetection, type VaultVersion } from '@/lib/vault-detection'
 import { useVaultStateV3 } from '@/lib/hooks-v3'
 import { useVaultStateV2 } from '@/lib/hooks-v2'
@@ -85,8 +87,16 @@ function PortfolioV3Content({ vaultAddress }: { vaultAddress: Address }) {
   const { address } = useAccount()
   const chainId = useChainId()
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const vaultState = useVaultStateV3(vaultAddress)
+
+  const handleLogoClick = () => {
+    setIsRefreshing(true)
+    setTimeout(() => {
+      window.location.reload()
+    }, 300)
+  }
 
   const handleWithdrawSuccess = () => {
     setTimeout(() => {
@@ -97,11 +107,29 @@ function PortfolioV3Content({ vaultAddress }: { vaultAddress: Address }) {
   const hasBalance = vaultState.totalValueUsd > 0
   const assetsWithBalance = vaultState.assets.filter(a => a.balance > BigInt(0))
 
+  // Determine alignment status (V3 doesn't have drift tracking, so always "aligned")
+  const alignmentStatus = 'Within your targets'
+
   return (
     <div className="flex flex-col min-h-[85vh]">
-      {/* Hero section - Balance */}
-      <div className="py-8 md:py-12">
-        <p className="text-[64px] md:text-[80px] font-extralight tracking-tight tabular-nums text-center">
+      {/* Header - Logo + Profile */}
+      <header className="flex items-center justify-between mb-4">
+        <button
+          onClick={handleLogoClick}
+          className={`text-lg font-extralight tracking-tight transition-all cursor-pointer ${
+            isRefreshing
+              ? 'text-[var(--primary)] scale-105 animate-pulse'
+              : 'text-[var(--foreground)] hover:text-[var(--primary)] active:scale-95'
+          }`}
+        >
+          {isRefreshing ? 'Refreshing...' : 'Meezan'}
+        </button>
+        <ProfileMenu />
+      </header>
+
+      {/* Hero section - Total Value */}
+      <div className="py-12 md:py-16 text-center flex-1">
+        <p className="text-[64px] md:text-[80px] font-extralight tracking-tight tabular-nums">
           {vaultState.isLoading ? (
             <span className="opacity-10">—</span>
           ) : (
@@ -109,101 +137,70 @@ function PortfolioV3Content({ vaultAddress }: { vaultAddress: Address }) {
           )}
         </p>
 
+        {/* Alignment status */}
+        {hasBalance && !vaultState.isLoading && (
+          <p className="text-[var(--muted)] mt-4">{alignmentStatus}</p>
+        )}
+
         {/* Allocation bar */}
         {hasBalance && !vaultState.isLoading && (
-          <div className="w-full max-w-2xl mx-auto mt-8">
+          <div className="w-full max-w-md mx-auto mt-8">
             <AllocationBar assets={vaultState.assets} />
+            {/* Asset legend */}
+            <div className="flex justify-center gap-6 mt-4">
+              {assetsWithBalance.map((asset) => (
+                <div key={asset.assetId} className="flex items-center gap-2">
+                  <span
+                    className="w-2 h-2 rounded-full"
+                    style={{ backgroundColor: asset.color }}
+                  />
+                  <span className="text-sm text-[var(--muted)]">{asset.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Actions - centered, minimal */}
+        {hasBalance && !vaultState.isLoading && (
+          <div className="mt-8">
+            <div className="flex justify-center gap-6">
+              <Link
+                href={`/details?vault=${vaultAddress}`}
+                className="text-[var(--primary)] hover:opacity-80 transition-opacity"
+              >
+                View details
+              </Link>
+              <button
+                onClick={() => setShowWithdrawDialog(true)}
+                className="text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors"
+              >
+                Withdraw
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!hasBalance && !vaultState.isLoading && (
+          <div className="mt-8">
+            <p className="text-[var(--muted)] mb-4">No holdings yet.</p>
+            <Link href="/setup">
+              <Button>Deposit</Button>
+            </Link>
+          </div>
+        )}
+
+        {/* Loading state */}
+        {vaultState.isLoading && (
+          <div className="mt-8">
+            <div className="w-8 h-8 mx-auto border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
           </div>
         )}
       </div>
 
-      {/* Two-column layout on desktop */}
-      {hasBalance && !vaultState.isLoading && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 py-10">
-          {/* Left column: Holdings */}
-          <div>
-            <div className="flex items-center gap-4 mb-6">
-              <span className="text-xs text-[var(--muted)] uppercase tracking-[0.2em]">Holdings</span>
-              <div className="flex-1 h-px bg-[var(--border)]" />
-            </div>
-
-            <div className="space-y-5">
-              {assetsWithBalance.map((asset) => (
-                <div key={asset.assetId} className="flex justify-between items-baseline">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: asset.color }}
-                    />
-                    <span>{asset.name}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-lg tabular-nums">{formatUsd(asset.valueUsd)}</span>
-                    <span className="text-[var(--foreground-secondary)] text-sm ml-3 tabular-nums">
-                      {formatBalance(asset.balance, asset.decimals, asset.symbol)}
-                    </span>
-                  </div>
-                </div>
-              ))}
-
-              {/* Total row */}
-              <div className="pt-4 mt-2 border-t border-[var(--border)]">
-                <div className="flex justify-between items-baseline">
-                  <span className="text-[var(--muted)]">Total</span>
-                  <span className="text-xl tabular-nums font-medium">{formatUsd(vaultState.totalValueUsd)}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Right column: Actions */}
-          <div>
-            <div className="flex items-center gap-4 mb-6">
-              <span className="text-xs text-[var(--muted)] uppercase tracking-[0.2em]">Actions</span>
-              <div className="flex-1 h-px bg-[var(--border)]" />
-            </div>
-
-            <div className="space-y-4">
-              <Button
-                size="default"
-                onClick={() => setShowWithdrawDialog(true)}
-                className="w-full md:w-auto"
-              >
-                Withdraw
-              </Button>
-
-              <div className="flex flex-wrap gap-4">
-                <Link href="/setup" className="text-sm text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors">
-                  Deposit
-                </Link>
-                <button
-                  onClick={() => vaultState.refetch()}
-                  className="text-sm text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors"
-                >
-                  Refresh
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!hasBalance && !vaultState.isLoading && (
-        <div className="py-8 text-center">
-          <p className="text-[var(--muted)] mb-4">This vault has no balance.</p>
-          <Link href="/setup">
-            <Button>Deposit</Button>
-          </Link>
-        </div>
-      )}
-
-      {/* Loading state */}
-      {vaultState.isLoading && (
-        <div className="py-8 text-center">
-          <div className="w-8 h-8 mx-auto border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
-        </div>
-      )}
+      {/* Footer - informational links */}
+      <AppFooter />
 
       {/* V3 Withdraw Dialog */}
       <WithdrawV3Dialog
@@ -221,18 +218,45 @@ function PortfolioV3Content({ vaultAddress }: { vaultAddress: Address }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Legacy vault view with upgrade banner.
- * V2 creation is now forbidden - all legacy vaults show upgrade prompt.
+ * Legacy portfolio view with upgrade banner.
+ * V2 creation is now forbidden - all legacy portfolios show upgrade prompt.
  */
 function LegacyVaultContent({ vaultAddress }: { vaultAddress: Address }) {
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const vaultState = useVaultStateV2(vaultAddress)
+
+  const handleLogoClick = () => {
+    setIsRefreshing(true)
+    setTimeout(() => {
+      window.location.reload()
+    }, 300)
+  }
 
   const hasBalance = vaultState.totalValueUsd > 0
   const assetsWithBalance = vaultState.assets.filter(a => a.balance > BigInt(0))
 
+  // Determine alignment status based on drift
+  const needsAdjustment = vaultState.needsRebalance
+  const alignmentStatus = needsAdjustment ? 'Adjustment available' : 'Within your targets'
+
   return (
     <div className="flex flex-col min-h-[85vh]">
-      {/* Upgrade Banner - shown for all legacy vaults */}
+      {/* Header - Logo + Profile */}
+      <header className="flex items-center justify-between mb-4">
+        <button
+          onClick={handleLogoClick}
+          className={`text-lg font-extralight tracking-tight transition-all cursor-pointer ${
+            isRefreshing
+              ? 'text-[var(--primary)] scale-105 animate-pulse'
+              : 'text-[var(--foreground)] hover:text-[var(--primary)] active:scale-95'
+          }`}
+        >
+          {isRefreshing ? 'Refreshing...' : 'Meezan'}
+        </button>
+        <ProfileMenu />
+      </header>
+
+      {/* Upgrade Banner - shown for all legacy portfolios */}
       {hasBalance && !vaultState.isLoading && (
         <UpgradeV3Banner
           legacyVaultAddress={vaultAddress}
@@ -240,9 +264,9 @@ function LegacyVaultContent({ vaultAddress }: { vaultAddress: Address }) {
         />
       )}
 
-      {/* Hero section - Balance */}
-      <div className="py-8 md:py-12">
-        <p className="text-[64px] md:text-[80px] font-extralight tracking-tight tabular-nums text-center">
+      {/* Hero section - Total Value */}
+      <div className="py-12 md:py-16 text-center flex-1">
+        <p className="text-[64px] md:text-[80px] font-extralight tracking-tight tabular-nums">
           {vaultState.isLoading ? (
             <span className="opacity-10">—</span>
           ) : (
@@ -250,67 +274,64 @@ function LegacyVaultContent({ vaultAddress }: { vaultAddress: Address }) {
           )}
         </p>
 
+        {/* Alignment status */}
+        {hasBalance && !vaultState.isLoading && (
+          <p className={`mt-4 ${needsAdjustment ? 'text-[var(--warning)]' : 'text-[var(--muted)]'}`}>
+            {alignmentStatus}
+          </p>
+        )}
+
         {/* Allocation bar */}
         {hasBalance && !vaultState.isLoading && (
-          <div className="w-full max-w-2xl mx-auto mt-8">
+          <div className="w-full max-w-md mx-auto mt-8">
             <AllocationBar assets={vaultState.assets} />
+            {/* Asset legend */}
+            <div className="flex justify-center gap-6 mt-4">
+              {assetsWithBalance.map((asset) => (
+                <div key={asset.assetId} className="flex items-center gap-2">
+                  <span
+                    className="w-2 h-2 rounded-full"
+                    style={{ backgroundColor: asset.color }}
+                  />
+                  <span className="text-sm text-[var(--muted)]">{asset.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Actions - centered, minimal */}
+        {hasBalance && !vaultState.isLoading && (
+          <div className="mt-8">
+            <Link
+              href={`/details-v2?vault=${vaultAddress}`}
+              className={needsAdjustment ? 'text-[var(--primary)] hover:opacity-80 transition-opacity' : 'text-[var(--foreground-secondary)] hover:text-[var(--foreground)] transition-colors'}
+            >
+              View details
+            </Link>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!hasBalance && !vaultState.isLoading && (
+          <div className="mt-8">
+            <p className="text-[var(--muted)] mb-4">No holdings yet.</p>
+            <Link href="/setup">
+              <Button>Get started</Button>
+            </Link>
+          </div>
+        )}
+
+        {/* Loading */}
+        {vaultState.isLoading && (
+          <div className="mt-8">
+            <div className="w-8 h-8 mx-auto border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
           </div>
         )}
       </div>
 
-      {/* Holdings - read-only view */}
-      {hasBalance && !vaultState.isLoading && (
-        <div className="max-w-md mx-auto w-full">
-          <div className="flex items-center gap-4 mb-6">
-            <span className="text-xs text-[var(--muted)] uppercase tracking-[0.2em]">Current Holdings</span>
-            <div className="flex-1 h-px bg-[var(--border)]" />
-          </div>
-
-          <div className="space-y-5">
-            {assetsWithBalance.map((asset) => (
-              <div key={asset.assetId} className="flex justify-between items-baseline">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="w-2 h-2 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: asset.color }}
-                  />
-                  <span>{asset.name}</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-lg tabular-nums">{formatUsd(asset.valueUsd)}</span>
-                  <span className="text-[var(--foreground-secondary)] text-sm ml-3 tabular-nums">
-                    {formatBalance(asset.balance, asset.decimals, asset.symbol)}
-                  </span>
-                </div>
-              </div>
-            ))}
-
-            <div className="pt-4 mt-2 border-t border-[var(--border)]">
-              <div className="flex justify-between items-baseline">
-                <span className="text-[var(--muted)]">Total</span>
-                <span className="text-xl tabular-nums font-medium">{formatUsd(vaultState.totalValueUsd)}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!hasBalance && !vaultState.isLoading && (
-        <div className="py-8 text-center">
-          <p className="text-[var(--muted)] mb-4">This portfolio has no balance.</p>
-          <Link href="/setup">
-            <Button>Create new portfolio</Button>
-          </Link>
-        </div>
-      )}
-
-      {/* Loading */}
-      {vaultState.isLoading && (
-        <div className="py-8 text-center">
-          <div className="w-8 h-8 mx-auto border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
-        </div>
-      )}
+      {/* Footer - informational links */}
+      <AppFooter />
     </div>
   )
 }
@@ -386,6 +407,7 @@ function PortfolioContent() {
           </svg>
         </div>
         <h2 className="text-xl font-semibold mb-2">Couldn&apos;t load your portfolio</h2>
+        <p className="text-[var(--foreground)] mb-2">Your funds are safe.</p>
         <p className="text-[var(--muted)] mb-6 max-w-[300px]">
           We had trouble connecting. Please try again.
         </p>

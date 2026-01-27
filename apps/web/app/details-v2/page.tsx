@@ -1,10 +1,13 @@
 'use client'
 
 import { Suspense, useState, useEffect } from 'react'
+import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAccount, useChainId, useSwitchChain } from 'wagmi'
 import { type Address, formatUnits } from 'viem'
 import { Button } from '@/components/Button'
+import { ProfileMenu } from '@/components/ProfileMenu'
+import { AppFooter } from '@/components/AppFooter'
 
 // Base mainnet chain ID
 const BASE_CHAIN_ID = 8453
@@ -245,6 +248,7 @@ function DetailsContentV2() {
     return (
       <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
         <p className="text-lg mb-2">{rebalanceError.title}</p>
+        <p className="text-[var(--foreground)] mb-2">Your funds are safe. Nothing was moved.</p>
         <p className="text-sm text-[var(--muted)] mb-8">{rebalanceError.message}</p>
         <button
           onClick={dismissError}
@@ -260,10 +264,10 @@ function DetailsContentV2() {
     return (
       <div className="flex flex-col min-h-[85vh] items-center justify-center text-center">
         <p className="text-lg mb-2">
-          {rebalanceState === 'confirming' ? 'Confirm in wallet' : 'Rebalancing'}
+          {rebalanceState === 'confirming' ? 'Confirm in wallet' : 'Restoring balance'}
         </p>
         <p className="text-sm text-[var(--muted)]">
-          {rebalanceState === 'confirming' ? 'Approve the transaction' : 'Executing swaps...'}
+          {rebalanceState === 'confirming' ? 'Confirm in your wallet' : 'Adjusting your allocation...'}
         </p>
       </div>
     )
@@ -271,13 +275,19 @@ function DetailsContentV2() {
 
   return (
     <div className="flex flex-col min-h-[85vh]">
-      {/* Back link */}
-      <button
-        onClick={() => router.push(`/portfolio-v2?vault=${vaultAddress}`)}
-        className="text-[var(--muted)] text-sm mb-8 text-left hover:text-[var(--foreground)] transition-colors"
-      >
-        ← Portfolio
-      </button>
+      {/* Header - Logo + Profile */}
+      <header className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-4">
+          <Link
+            href="/portfolio"
+            className="text-lg font-extralight tracking-tight text-[var(--foreground)] hover:text-[var(--primary)] transition-colors"
+          >
+            Meezan
+          </Link>
+          <span className="text-[var(--muted)] text-sm">/ Details</span>
+        </div>
+        <ProfileMenu />
+      </header>
 
       {/* Two-column layout on desktop: Holdings | Rules & Status */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 flex-1">
@@ -340,7 +350,7 @@ function DetailsContentV2() {
             <div className="flex justify-between items-baseline">
               <span className="text-[var(--muted)]">Status</span>
               <span className={vaultState.needsRebalance ? 'text-[var(--warning)] font-medium' : 'text-[var(--muted)]'}>
-                {vaultState.needsRebalance ? 'Rebalance available' : 'No action needed'}
+                {vaultState.needsRebalance ? 'Adjustment available' : 'Within your targets'}
               </span>
             </div>
           </div>
@@ -358,7 +368,7 @@ function DetailsContentV2() {
                   onClick={handleRebalanceClick}
                   className="text-[var(--primary)] font-medium hover:opacity-80 transition-opacity"
                 >
-                  Rebalance now
+                  Restore balance
                 </button>
               ) : (
                 <p className="text-sm text-[var(--muted)]">
@@ -372,32 +382,35 @@ function DetailsContentV2() {
           <div className="mt-8 pt-6 border-t border-[var(--border)]">
             {vaultState.lastRebalanceAt && (
               <p className="text-xs text-[var(--muted)] mb-2">
-                Last rebalanced: {vaultState.lastRebalanceAt.toLocaleDateString()}
+                Last adjusted: {vaultState.lastRebalanceAt.toLocaleDateString()}
               </p>
             )}
             {vaultAddress && (
               <p className="text-xs text-[var(--muted)] opacity-40 tabular-nums tracking-wide">
-                Vault: {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
+                Address: {vaultAddress.slice(0, 6)}...{vaultAddress.slice(-4)}
               </p>
             )}
           </div>
         </div>
       </div>
 
-      {/* Rebalance confirmation dialog */}
+      {/* Footer - informational links */}
+      <AppFooter />
+
+      {/* Restore balance confirmation dialog */}
       <ConfirmDialog
         isOpen={showRebalanceConfirm}
         onClose={() => setShowRebalanceConfirm(false)}
         onConfirm={handleRebalanceConfirm}
-        title="Rebalance portfolio"
-        description="This will restore your allocation to target weights by swapping assets through USDC."
+        title="Restore your allocation"
+        description="This will adjust your holdings to match your target weights."
         details={[
           { label: 'Current max drift', value: `${vaultState.portfolioDriftPct.toFixed(1)}%` },
           { label: 'Max drift asset', value: vaultState.maxDriftAsset ?? '—' },
-          { label: 'Assets to rebalance', value: `${vaultState.assets.filter(a => a.driftPct > 0.5).length}` },
-          { label: 'Network fee', value: estimateUsd(300000) },
+          { label: 'Assets to adjust', value: `${vaultState.assets.filter(a => a.driftPct > 0.5).length}` },
+          { label: 'Processing fee', value: estimateUsd(300000) },
         ]}
-        confirmText="Rebalance"
+        confirmText="Restore balance"
       />
     </div>
   )
